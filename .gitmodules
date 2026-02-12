@@ -1,3 +1,18 @@
 [submodule "external/acl2-mcp"]
 	path = external/acl2-mcp
 	url = https://github.com/jimwhite/acl2-mcp
+[submodule "external/ontological-engineer"]
+	path = external/ontological-engineer
+	url = https://github.com/wiki3-ai/ontological-engineer.git
+[submodule "external/verified-agent"]
+	path = external/verified-agent
+	url = https://github.com/wiki3-ai/verified-agent.git
+[submodule "external/acl2"]
+	path = external/acl2
+	url = https://github.com/jimwhite/acl2.git
+[submodule "external/acl2-jupyter"]
+	path = external/acl2-jupyter
+	url = https://github.com/jimwhite/acl2-jupyter.git
+[submodule "external/coderag-ai"]
+	path = external/coderag-ai
+	url = https://github.com/shivamsahu-tech/coderag-ai.git
