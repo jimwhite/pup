@@ -1,0 +1,3 @@
+[submodule "external/acl2-mcp"]
+	path = external/acl2-mcp
+	url = https://github.com/jimwhite/acl2-mcp

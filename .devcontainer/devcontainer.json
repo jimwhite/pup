@@ -1,0 +1,59 @@
+{
+    "name": "PUP",
+    "image": "ghcr.io/jimwhite/acl2-jupyter:latest",
+    "forwardPorts": [
+        8888
+    ],
+    "portsAttributes": {
+        "8888": {
+            "label": "Jupyter",
+            "requireLocalPort": true
+        }
+    },
+    "containerEnv": {
+        "JUPYTER_PORT": "8888",
+        "RESTARTABLE": "yes",
+        "USER": "jovyan",
+        "ACL2_LISP": "sbcl",
+        "ACL2": "/home/acl2/saved_acl2",
+        "ACL2_HOME": "/home/acl2",
+        "ACL2_SYSTEM_BOOKS": "/home/acl2/books"        
+    },
+    "remoteEnv": {
+        "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
+        "PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:HOME}/.cargo/bin:${containerEnv:PATH}"
+    },
+    "postCreateCommand": ".devcontainer/post-create.sh ${containerWorkspaceFolder}",
+    "postStartCommand": "grep -q 'source.*\\.venv/bin/activate' ~/.bashrc || echo 'source ${containerWorkspaceFolder}/.venv/bin/activate' >> ~/.bashrc",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-toolsai.jupyter",
+                "ms-copilot.vscode-copilot-chat"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+                "python.terminal.activateEnvironment": true,
+                "python.terminal.activateEnvInCurrentTerminal": true
+            },
+            "mcp": {
+                "servers": {
+                    "acl2-mcp": {
+                        "command": "${containerWorkspaceFolder}/.venv/bin/acl2-mcp",
+                        "args": [],
+                        "env": {
+                            "ACL2_HOME": "/home/acl2",
+                            "ACL2_SYSTEM_BOOKS": "/home/acl2/books",
+                            "ACL2": "/opt/acl2/bin/saved_acl2",
+                            "SBCL_USER_ARGS": "--noinform",
+                            "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
+                            "PATH": "${containerWorkspaceFolder}/.venv/bin:/opt/acl2/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
