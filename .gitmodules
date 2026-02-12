@@ -18,4 +18,4 @@
 	url = https://github.com/shivamsahu-tech/coderag-ai.git
 [submodule "external/parinfer-rust"]
 	path = external/parinfer-rust
-	url = https://github.com/eraserhd/parinfer-rust
+	url = https://github.com/jimwhite/parinfer-rust.git
