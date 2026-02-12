@@ -40,7 +40,7 @@ if command -v parinfer-rust >/dev/null 2>&1; then
     echo "✓ parinfer-rust already installed"
 else
     echo "Installing parinfer-rust from GitHub..."
-    cargo install --git https://github.com/eraserhd/parinfer-rust
+    cargo install --path external/parinfer-rust
     echo "✓ parinfer-rust installed"
 fi
 
