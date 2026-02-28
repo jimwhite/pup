@@ -35,9 +35,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -81,6 +83,7 @@ DEFAULT_WEAVIATE_GRPC_PORT = 50051
 DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text:latest"
 DEFAULT_BATCH_SIZE = 200
+DEFAULT_JOBS = min(multiprocessing.cpu_count(), 8)
 CHECKPOINT_FILE = "scripts/.ingest_checkpoint.json"
 
 log = logging.getLogger("ingest-notebooks")
@@ -323,6 +326,27 @@ def _symbol_uuid(qualified_name: str) -> str:
 # ─── Discovery ───────────────────────────────────────────────────────
 
 
+# Byte-level marker for placeholder notebooks — avoids a full JSON parse.
+_PLACEHOLDER_MARKER = b'"placeholder": true'
+# Read at most this many bytes for the placeholder check.  The metadata
+# block is near the end of the file, but placeholder notebooks are tiny
+# (< 1 KB), so reading the first 4 KB is sufficient.
+_PLACEHOLDER_READ_SIZE = 4096
+
+
+def _is_placeholder(path: Path) -> bool:
+    """Fast check: is this a tiny placeholder notebook?"""
+    try:
+        size = path.stat().st_size
+        if size > _PLACEHOLDER_READ_SIZE:
+            return False  # real notebooks are larger
+        with open(path, "rb") as f:
+            head = f.read(_PLACEHOLDER_READ_SIZE)
+        return _PLACEHOLDER_MARKER in head
+    except OSError:
+        return False
+
+
 def find_notebooks(source_dir: Path) -> list[Path]:
     """Recursively find all ``.ipynb`` files, skipping placeholders."""
     notebooks: list[Path] = []
@@ -331,16 +355,7 @@ def find_notebooks(source_dir: Path) -> list[Path]:
             if not name.endswith(".ipynb"):
                 continue
             path = Path(root) / name
-            # Quick check: skip placeholder notebooks.
-            try:
-                with open(path) as f:
-                    # Only read enough to check metadata.placeholder.
-                    raw = json.load(f)
-                if raw.get("metadata", {}).get("placeholder"):
-                    log.debug("Skipping placeholder: %s", path)
-                    continue
-            except (json.JSONDecodeError, OSError):
-                log.warning("Skipping unreadable file: %s", path)
+            if _is_placeholder(path):
                 continue
             notebooks.append(path)
     notebooks.sort()
@@ -374,16 +389,22 @@ def ensure_collections(
     recreate: bool = False,
     include_outputs: bool = False,
 ) -> None:
-    """Create (or recreate) the three ACL2 collections."""
-    collections = [COLLECTION_NOTEBOOK, COLLECTION_CELL, COLLECTION_SYMBOL]
+    """Create (or recreate) the three ACL2 collections.
+
+    Creation order matters: Notebook first (no deps), then Symbol (self-ref
+    only), then Cell (refs both Notebook and Symbol).  The Symbol→Cell
+    back-reference (``definedInCell``) is added after Cell exists.
+    """
+    collections = [COLLECTION_NOTEBOOK, COLLECTION_SYMBOL, COLLECTION_CELL]
 
     if recreate:
-        for name in collections:
+        # Delete in reverse dependency order.
+        for name in reversed(collections):
             if client.collections.exists(name):
                 log.info("Deleting collection %s", name)
                 client.collections.delete(name)
 
-    # ── ACL2Notebook ─────────────────────────────────────────────────
+    # ── ACL2Notebook (no deps) ───────────────────────────────────────
     if not client.collections.exists(COLLECTION_NOTEBOOK):
         log.info("Creating collection %s", COLLECTION_NOTEBOOK)
         client.collections.create(
@@ -418,7 +439,44 @@ def ensure_collections(
     else:
         log.info("Collection %s already exists, skipping", COLLECTION_NOTEBOOK)
 
-    # ── ACL2Cell ─────────────────────────────────────────────────────
+    # ── ACL2Symbol (self-ref only; definedInCell added after Cell) ────
+    if not client.collections.exists(COLLECTION_SYMBOL):
+        log.info("Creating collection %s", COLLECTION_SYMBOL)
+        client.collections.create(
+            COLLECTION_SYMBOL,
+            vectorizer_config=[
+                Configure.NamedVectors.text2vec_ollama(
+                    name="symbol_vector",
+                    api_endpoint=ollama_url,
+                    model=embed_model,
+                    source_properties=["qualified_name"],
+                ),
+            ],
+            properties=[
+                Property(name="name", data_type=DataType.TEXT,
+                         description="Symbol name"),
+                Property(name="package", data_type=DataType.TEXT,
+                         description="Symbol package",
+                         skip_vectorization=True),
+                Property(name="qualified_name", data_type=DataType.TEXT,
+                         description="PACKAGE::NAME canonical form"),
+                Property(name="kind", data_type=DataType.TEXT,
+                         description="function/macro/theorem/constant/stobj/variable/etc.",
+                         skip_vectorization=True),
+                Property(name="is_operator", data_type=DataType.BOOL,
+                         description="True if ever appeared in operator position"),
+            ],
+            references=[
+                ReferenceProperty(
+                    name="dependsOn",
+                    target_collection=COLLECTION_SYMBOL,
+                ),
+            ],
+        )
+    else:
+        log.info("Collection %s already exists, skipping", COLLECTION_SYMBOL)
+
+    # ── ACL2Cell (refs Notebook + Symbol) ────────────────────────────
     if not client.collections.exists(COLLECTION_CELL):
         log.info("Creating collection %s", COLLECTION_CELL)
 
@@ -489,46 +547,19 @@ def ensure_collections(
     else:
         log.info("Collection %s already exists, skipping", COLLECTION_CELL)
 
-    # ── ACL2Symbol ───────────────────────────────────────────────────
-    if not client.collections.exists(COLLECTION_SYMBOL):
-        log.info("Creating collection %s", COLLECTION_SYMBOL)
-        client.collections.create(
-            COLLECTION_SYMBOL,
-            vectorizer_config=[
-                Configure.NamedVectors.text2vec_ollama(
-                    name="symbol_vector",
-                    api_endpoint=ollama_url,
-                    model=embed_model,
-                    source_properties=["qualified_name"],
-                ),
-            ],
-            properties=[
-                Property(name="name", data_type=DataType.TEXT,
-                         description="Symbol name"),
-                Property(name="package", data_type=DataType.TEXT,
-                         description="Symbol package",
-                         skip_vectorization=True),
-                Property(name="qualified_name", data_type=DataType.TEXT,
-                         description="PACKAGE::NAME canonical form"),
-                Property(name="kind", data_type=DataType.TEXT,
-                         description="function/macro/theorem/constant/stobj/variable/etc.",
-                         skip_vectorization=True),
-                Property(name="is_operator", data_type=DataType.BOOL,
-                         description="True if ever appeared in operator position"),
-            ],
-            references=[
-                ReferenceProperty(
-                    name="dependsOn",
-                    target_collection=COLLECTION_SYMBOL,
-                ),
-                ReferenceProperty(
-                    name="definedInCell",
-                    target_collection=COLLECTION_CELL,
-                ),
-            ],
+    # ── Add Symbol→Cell back-reference (now that Cell exists) ────────
+    sym_collection = client.collections.get(COLLECTION_SYMBOL)
+    existing_refs = {
+        p.name for p in sym_collection.config.get().references
+    }
+    if "definedInCell" not in existing_refs:
+        log.info("Adding definedInCell reference to %s", COLLECTION_SYMBOL)
+        sym_collection.config.add_reference(
+            ReferenceProperty(
+                name="definedInCell",
+                target_collection=COLLECTION_CELL,
+            ),
         )
-    else:
-        log.info("Collection %s already exists, skipping", COLLECTION_SYMBOL)
 
 
 # ─── Upsert phases ──────────────────────────────────────────────────
@@ -819,6 +850,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include stdout and execute_result in cells (omitted by default)",
     )
     p.add_argument(
+        "-j", "--jobs", type=int, default=DEFAULT_JOBS,
+        help=f"Parallel workers for parsing (default: {DEFAULT_JOBS})",
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="Parse notebooks and report stats without writing to Weaviate",
     )
@@ -876,23 +911,53 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Processing %d notebooks (%d skipped via checkpoint)",
              len(paths_to_process), len(notebook_paths) - len(paths_to_process))
 
-    # ── Parse ────────────────────────────────────────────────────────
-    log.info("Parsing notebooks...")
+    # ── Parse (parallel) ─────────────────────────────────────────────
+    jobs = max(1, args.jobs)
+    log.info("Parsing %d notebooks with %d workers...",
+             len(paths_to_process), jobs)
     t0 = time.time()
     parsed: list[NotebookInfo] = []
     errors = 0
-    for i, path in enumerate(paths_to_process, 1):
-        try:
-            nb_info = parse_notebook(path, args.source_prefix, args.include_outputs)
-            parsed.append(nb_info)
-        except Exception as exc:
-            log.error("Failed to parse %s: %s", path, exc)
-            errors += 1
-        if i % 100 == 0:
-            log.info("  Parsed %d / %d ...", i, len(paths_to_process))
+
+    if jobs == 1:
+        # Single-process fast path (easier to debug).
+        for i, path in enumerate(paths_to_process, 1):
+            try:
+                nb_info = parse_notebook(path, args.source_prefix,
+                                         args.include_outputs)
+                parsed.append(nb_info)
+            except Exception as exc:
+                log.error("Failed to parse %s: %s", path, exc)
+                errors += 1
+            if i % 500 == 0:
+                log.info("  Parsed %d / %d ...", i, len(paths_to_process))
+    else:
+        # Parallel parsing with ProcessPoolExecutor.
+        futures = {}
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            for path in paths_to_process:
+                fut = pool.submit(parse_notebook, path,
+                                  args.source_prefix, args.include_outputs)
+                futures[fut] = path
+
+            done_count = 0
+            for fut in as_completed(futures):
+                done_count += 1
+                try:
+                    nb_info = fut.result()
+                    parsed.append(nb_info)
+                except Exception as exc:
+                    log.error("Failed to parse %s: %s",
+                              futures[fut], exc)
+                    errors += 1
+                if done_count % 500 == 0:
+                    log.info("  Parsed %d / %d ...",
+                             done_count, len(paths_to_process))
 
     elapsed = time.time() - t0
-    log.info("Parsed %d notebooks in %.1fs (%d errors)", len(parsed), elapsed, errors)
+    rate = len(parsed) / elapsed if elapsed > 0 else 0
+    log.info("Parsed %d notebooks in %.1fs (%.0f/s, %d errors)",
+             len(parsed), elapsed, rate, errors)
 
     # ── Collect global symbols ───────────────────────────────────────
     global_syms = _collect_global_symbols(parsed)
