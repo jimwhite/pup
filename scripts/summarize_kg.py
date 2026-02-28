@@ -397,6 +397,39 @@ def _fetch_cells_for_notebook(
     return cells
 
 
+# Sentinel value: user explicitly asked for the repo root (no books/ prefix).
+_ROOT_SENTINEL = "__ROOT__"
+
+
+def _normalize_source_dir(source_dir: str | None) -> str | None:
+    """Normalize a --source-dir value to match stored source_file paths.
+
+    Stored source_file values are relative, e.g. ``books/std/lists/list-defuns.lisp``.
+    Users may pass filesystem paths like ``data/home/acl2/books/std`` or absolute
+    paths.  This function strips known prefixes so the value lines up.
+
+    Returns ``_ROOT_SENTINEL`` when the user pointed at the ACL2 root itself
+    (e.g. ``data/home/acl2``) — meaning "only top-level files, not under books/".
+    """
+    if not source_dir:
+        return None
+    sd = source_dir.rstrip("/")
+    # Strip absolute workspace prefix if present
+    workspace = "/workspaces/pup/"
+    if sd.startswith(workspace):
+        sd = sd[len(workspace):]
+    # Strip data/home/acl2 filesystem prefix (mirrors ingest source_prefix)
+    for prefix in ("data/home/acl2/", "data/home/acl2"):
+        if sd.startswith(prefix):
+            sd = sd[len(prefix.rstrip("/")) + 1:] if sd != prefix.rstrip("/") else ""
+            break
+    sd = sd.strip("/")
+    if not sd:
+        # User pointed at ACL2 root (e.g. data/home/acl2) — return sentinel
+        return _ROOT_SENTINEL
+    return sd
+
+
 def _fetch_all_notebook_sources(
     client: weaviate.WeaviateClient,
     source_dir: str | None = None,
@@ -407,6 +440,10 @@ def _fetch_all_notebook_sources(
     If *no_recurse* is True and *source_dir* is set, only return notebooks
     whose parent directory exactly matches *source_dir* (no subdirectories).
     """
+    source_dir = _normalize_source_dir(source_dir)
+    log.debug("_fetch_all_notebook_sources: normalized source_dir=%r, no_recurse=%s",
+             source_dir, no_recurse)
+
     nb_coll = client.collections.get(COLLECTION_NOTEBOOK)
     sources: list[str] = []
 
@@ -414,7 +451,13 @@ def _fetch_all_notebook_sources(
         return_properties=["source_file"],
     ):
         src = obj.properties.get("source_file", "")
-        if source_dir:
+        if source_dir == _ROOT_SENTINEL:
+            # Root-level files only: no "/" in path means top-level.
+            if no_recurse:
+                if "/" in src:
+                    continue
+            # Without --no-recurse on root → all notebooks (no filter)
+        elif source_dir:
             if no_recurse:
                 # Match only notebooks directly in source_dir
                 parent = str(Path(src).parent)
@@ -583,7 +626,21 @@ async def summarize_cells(
     total_llm = 0
     all_results: dict[str, list[tuple[int, SummaryResult]]] = {}
 
+    # Build a set of notebook sources whose ALL cells are already done.
+    # We can skip fetching cells entirely for these.
+    done_cells = checkpoint.get("cells", set())
+    done_batches = checkpoint.get("cell_batches", set())
+
     for nb_idx, nb_src in enumerate(notebook_sources, 1):
+        # Fast notebook-level skip: if we have a notebook checkpoint marker
+        # we can avoid the expensive Weaviate cell fetch entirely.
+        if f"nb_done:{nb_src}" in done_batches:
+            total_skipped_cp += 1
+            if nb_idx % 500 == 0:
+                log.info("  Skipping: %d/%d notebooks (already done)",
+                         nb_idx, len(notebook_sources))
+            continue
+
         cells = _fetch_cells_for_notebook(client, nb_src)
         total_cells += len(cells)
 
@@ -698,6 +755,9 @@ async def summarize_cells(
 
             # Mark batch in checkpoint.
             checkpoint.setdefault("cell_batches", set()).add(batch_key)
+
+        # Mark entire notebook as done so we can fast-skip on restart.
+        checkpoint.setdefault("cell_batches", set()).add(f"nb_done:{nb_src}")
 
         all_results[nb_src] = nb_results
 
@@ -1363,11 +1423,16 @@ async def async_main(args: argparse.Namespace) -> int:
         )
 
         # ── Discover notebooks ───────────────────────────────────────
+        effective_dir = _normalize_source_dir(args.source_dir)
+        display_dir = "(root)" if effective_dir == _ROOT_SENTINEL else (effective_dir or "(all)")
+        if args.source_dir and effective_dir != args.source_dir:
+            log.info("Normalized --source-dir %r → %r",
+                     args.source_dir, display_dir)
         notebook_sources = _fetch_all_notebook_sources(
             client, args.source_dir, no_recurse=args.no_recurse,
         )
         log.info("Found %d notebooks%s%s", len(notebook_sources),
-                 f" under {args.source_dir}" if args.source_dir else "",
+                 f" under {display_dir}" if args.source_dir else "",
                  " (no recurse)" if args.no_recurse else "")
 
         if not notebook_sources:
