@@ -14,6 +14,7 @@ from flask import (Flask, render_template, request, redirect,
                    url_for, abort)
 import weaviate
 from weaviate.classes.query import QueryReference, Filter, MetadataQuery
+from weaviate.util import generate_uuid5
 
 app = Flask(__name__)
 
@@ -167,9 +168,11 @@ def symbol_detail():
     client = _get_client()
     sym = client.collections.get("ACL2Symbol")
 
-    resp = sym.query.fetch_objects(
-        filters=Filter.by_property("qualified_name").equal(qn),
-        limit=1,
+    # Use deterministic UUID for exact lookup (avoids word-tokenization
+    # issues with special chars like @ : - in qualified names).
+    symbol_uuid = generate_uuid5(f"symbol:{qn}")
+    obj = sym.query.fetch_object_by_id(
+        symbol_uuid,
         return_references=[
             QueryReference(link_on="dependsOn",
                            return_properties=["qualified_name", "kind",
@@ -180,10 +183,8 @@ def symbol_detail():
         ],
     )
 
-    if not resp.objects:
+    if obj is None:
         abort(404)
-
-    obj = resp.objects[0]
     symbol = dict(obj.properties)
 
     # Dependencies
@@ -213,8 +214,7 @@ def symbol_detail():
     reverse_deps = []
     try:
         rev_resp = sym.query.fetch_objects(
-            filters=Filter.by_ref("dependsOn").by_property(
-                "qualified_name").equal(qn),
+            filters=Filter.by_ref("dependsOn").by_id().equal(symbol_uuid),
             limit=50,
         )
         reverse_deps = sorted(
