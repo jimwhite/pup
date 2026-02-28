@@ -792,6 +792,7 @@ async def summarize_notebooks(
     batch_size: int,
     checkpoint: dict,
     dry_run: bool = False,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
 ) -> dict[str, SummaryResult]:
     """Phase 2: Generate notebook-level summaries via map-reduce over cell summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -826,8 +827,8 @@ async def summarize_notebooks(
             nb_summaries[nb_src] = SummaryResult()
             continue
 
-        # Map: chunk cell summaries and summarize each chunk.
-        chunks = _chunk_list(non_empty, NOTEBOOK_CHUNK_SIZE)
+        # Map: chunk cell summaries by context size.
+        chunks = _chunk_summaries_by_size(non_empty, context_size)
         intermediates: list[SummaryResult] = []
 
         llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
@@ -848,6 +849,27 @@ async def summarize_notebooks(
             final = intermediates[0]
         else:
             section_text = _format_intermediates(intermediates)
+            # If reduce text is too large, do hierarchical reduction.
+            if len(section_text.encode("utf-8")) > context_size - 400:
+                # Re-chunk and reduce iteratively.
+                int_pairs = [(i, s) for i, s in enumerate(intermediates)]
+                reduce_chunks = _chunk_summaries_by_size(
+                    int_pairs, context_size, prompt_overhead=400)
+                new_intermediates: list[SummaryResult] = []
+                for rc in reduce_chunks:
+                    rc_sums = [s for _, s in rc]
+                    rc_text = _format_intermediates(rc_sums)
+                    prompt = NOTEBOOK_REDUCE_PROMPT.format(
+                        source_file=nb_src,
+                        section_summaries=rc_text,
+                    )
+                    tcs, _ = await _cached_tool_call(
+                        prompt, llm_with_summary_tools, model, cache, sem,
+                    )
+                    new_intermediates.append(_summary_tools_to_result(tcs))
+                intermediates = new_intermediates
+                section_text = _format_intermediates(intermediates)
+
             prompt = NOTEBOOK_REDUCE_PROMPT.format(
                 source_file=nb_src,
                 section_summaries=section_text,
@@ -933,6 +955,66 @@ def _chunk_list(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _chunk_summaries_by_size(
+    items: list[tuple[int, SummaryResult]],
+    max_bytes: int,
+    prompt_overhead: int = 400,
+) -> list[list[tuple[int, SummaryResult]]]:
+    """Split cell summaries into chunks that fit within *max_bytes*.
+
+    Each chunk's formatted text plus *prompt_overhead* (for the prompt
+    template) stays under the limit.
+    """
+    limit = max_bytes - prompt_overhead
+    batches: list[list[tuple[int, SummaryResult]]] = []
+    current: list[tuple[int, SummaryResult]] = []
+    current_size = 0
+
+    for idx, s in items:
+        entry_size = 20  # "Cell N:\n"
+        if s.what:
+            entry_size += len(s.what.encode("utf-8")) + 10
+        if s.why:
+            entry_size += len(s.why.encode("utf-8")) + 10
+        if s.how:
+            entry_size += len(s.how.encode("utf-8")) + 10
+        if current and current_size + entry_size > limit:
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append((idx, s))
+        current_size += entry_size
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _chunk_text_parts_by_size(
+    parts: list[str],
+    max_bytes: int,
+    prompt_overhead: int = 400,
+) -> list[list[str]]:
+    """Split a list of text parts into chunks that fit within *max_bytes*."""
+    limit = max_bytes - prompt_overhead
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_size = 0
+
+    for part in parts:
+        part_size = len(part.encode("utf-8")) + 4  # separator overhead
+        if current and current_size + part_size > limit:
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append(part)
+        current_size += part_size
+
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _format_cell_summaries(cells: list[tuple[int, SummaryResult]]) -> str:
     """Format cell summaries into a text block for the notebook prompt."""
     parts = []
@@ -977,6 +1059,7 @@ async def summarize_directories(
     batch_size: int,
     checkpoint: dict,
     dry_run: bool = False,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
 ) -> dict[str, SummaryResult]:
     """Phase 3: Bottom-up directory summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -1045,16 +1128,42 @@ async def summarize_directories(
             dir_summaries[directory] = SummaryResult()
             continue
 
-        # Build and invoke prompt.
+        # Build and invoke prompt, chunking if needed.
         llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
-        prompt = DIRECTORY_REDUCE_PROMPT.format(
-            directory=directory,
-            contents="\n\n".join(contents_parts),
-        )
-        tcs, _ = await _cached_tool_call(
-            prompt, llm_with_summary_tools, model, cache, sem,
-        )
-        final = _summary_tools_to_result(tcs)
+        content_chunks = _chunk_text_parts_by_size(
+            contents_parts, context_size, prompt_overhead=400)
+
+        if len(content_chunks) == 1:
+            prompt = DIRECTORY_REDUCE_PROMPT.format(
+                directory=directory,
+                contents="\n\n".join(content_chunks[0]),
+            )
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            final = _summary_tools_to_result(tcs)
+        else:
+            # Multi-pass: summarize each chunk, then reduce.
+            chunk_results: list[SummaryResult] = []
+            for cc in content_chunks:
+                prompt = DIRECTORY_REDUCE_PROMPT.format(
+                    directory=directory,
+                    contents="\n\n".join(cc),
+                )
+                tcs, _ = await _cached_tool_call(
+                    prompt, llm_with_summary_tools, model, cache, sem,
+                )
+                chunk_results.append(_summary_tools_to_result(tcs))
+            # Final reduce over chunk results.
+            section_text = _format_intermediates(chunk_results)
+            prompt = DIRECTORY_REDUCE_PROMPT.format(
+                directory=directory,
+                contents=section_text,
+            )
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            final = _summary_tools_to_result(tcs)
         dir_summaries[directory] = final
 
         # Upsert to Weaviate.
@@ -1462,6 +1571,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 client, notebook_sources, cell_summaries,
                 llm, model, cache, sem,
                 args.batch_size, checkpoint, args.dry_run,
+                context_size=args.context_size,
             )
 
         # ── Phase 3: Directory summaries ─────────────────────────────
@@ -1471,6 +1581,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 client, notebook_sources, nb_summaries,
                 llm, model, cache, sem,
                 args.batch_size, checkpoint, args.dry_run,
+                context_size=args.context_size,
             )
 
         # ── Dry-run report ───────────────────────────────────────────
@@ -1507,6 +1618,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Suppress noisy HTTP-level logging from httpx / httpcore.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     return asyncio.run(async_main(args))
 
