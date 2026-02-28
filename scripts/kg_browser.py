@@ -51,7 +51,7 @@ KIND_COLORS = {
     "variable": "secondary",
     "special-form": "dark",
     "raw-function": "primary",
-    "unknown": "light",
+    "unknown": "secondary",
 }
 
 app.jinja_env.globals["kind_color"] = lambda k: KIND_COLORS.get(k, "light")
@@ -248,7 +248,17 @@ def notebook_view(source_file):
     )
 
     cells = []
+    seen_indices: set[int] = set()
     for obj in resp.objects:
+        # Weaviate TEXT tokenization can match related paths;
+        # post-filter to exact source_file match.
+        if obj.properties.get("notebook_source") != source_file:
+            continue
+        idx = obj.properties["cell_index"]
+        if idx in seen_indices:
+            continue
+        seen_indices.add(idx)
+
         syms_ref = obj.references.get("definesSymbols")
         defined_symbols = []
         if syms_ref and syms_ref.objects:
@@ -259,7 +269,7 @@ def notebook_view(source_file):
                 key=lambda x: x["qn"],
             )
         cells.append({
-            "index": obj.properties["cell_index"],
+            "index": idx,
             "type": obj.properties["cell_type"],
             "code_text": obj.properties.get("code_text") or "",
             "comment_text": obj.properties.get("comment_text") or "",
