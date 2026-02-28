@@ -51,6 +51,8 @@ from weaviate.classes.query import Filter
 from weaviate.util import generate_uuid5
 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
 
 # ─── Constants ───────────────────────────────────────────────────────
 
@@ -72,6 +74,7 @@ CHECKPOINT_FILE = "scripts/.summarize_checkpoint.json"
 
 # Maximum cell summaries per notebook chunk in the map step.
 NOTEBOOK_CHUNK_SIZE = 20
+DEFAULT_CONTEXT_SIZE = 8192
 
 log = logging.getLogger("summarize-kg")
 
@@ -102,6 +105,72 @@ class SummaryResult:
     what: str = ""
     why: str = ""
     how: str = ""
+
+
+# ─── Tool-calling models for batched cell summaries ─────────────────
+
+
+class ReportWhat(BaseModel):
+    """Report what a notebook cell does — its functional behaviour."""
+
+    cell_number: int = Field(description="The 0-based cell index")
+    summary: str = Field(
+        description="Concise description of what the cell does (1-3 sentences)"
+    )
+
+
+class ReportWhy(BaseModel):
+    """Report the purpose or goal of a notebook cell."""
+
+    cell_number: int = Field(description="The 0-based cell index")
+    summary: str = Field(description="The purpose or goal (1-3 sentences)")
+
+
+class ReportHow(BaseModel):
+    """Report usage instructions for a notebook cell."""
+
+    cell_number: int = Field(description="The 0-based cell index")
+    summary: str = Field(
+        description="Brief usage instructions (1-3 sentences)"
+    )
+
+
+class ContinuationContext(BaseModel):
+    """Provide context to carry forward when the notebook is split across batches."""
+
+    context: str = Field(
+        description="Key context from this batch needed to understand subsequent cells"
+    )
+
+
+CELL_TOOLS = [ReportWhat, ReportWhy, ReportHow, ContinuationContext]
+
+
+class SummaryWhat(BaseModel):
+    """Report what a notebook or directory provides — its overall functionality."""
+
+    summary: str = Field(
+        description="Concise description of overall functionality (2-4 sentences)"
+    )
+
+
+class SummaryWhy(BaseModel):
+    """Report the purpose or goal of a notebook or directory."""
+
+    summary: str = Field(
+        description="The broader purpose or goal (2-4 sentences)"
+    )
+
+
+class SummaryHow(BaseModel):
+    """Report usage instructions for a notebook or directory."""
+
+    summary: str = Field(
+        description="Usage instructions — include-book path, key functions/macros (2-4 sentences)"
+    )
+
+
+SUMMARY_TOOLS = [SummaryWhat, SummaryWhy, SummaryHow]
 
 
 # ─── LLM Call Memoization (SQLite) ──────────────────────────────────
@@ -198,106 +267,67 @@ def detect_lm_studio_model(base_url: str) -> str:
 
 # ─── Prompt templates ────────────────────────────────────────────────
 
-CELL_SUMMARY_PROMPT = """\
+BATCH_CELL_PROMPT = """\
 /no_think
 You are an expert in ACL2 (A Computational Logic for Applicative Common Lisp) \
-and formal verification.  Analyze the following ACL2 notebook cell and produce \
-a JSON object with up to three fields:
+and formal verification.  Below are cells from the notebook ``{source_file}``.
 
-- "what": A concise description of what this code or text does.
-- "why": The purpose or goal — why this exists.
-- "how": Brief instructions on how to use it (if applicable).
+For each substantive cell, call the appropriate tool(s):
+- report_what: describe what the cell does (functionality / behaviour)
+- report_why: explain the purpose or goal
+- report_how: provide usage instructions (only if applicable)
 
-Omit any field that does not apply (e.g. a pure comment cell may only have "what").
-Keep each field to 1-3 sentences.  Be precise and use ACL2 terminology correctly.
-
---- Cell Context ---
-Package: {package}
-Cell type: {cell_type}
-{symbols_section}
-{deps_section}
---- Cell Content ---
-{content}
-
-Respond with ONLY a valid JSON object, no markdown fences."""
+Use the cell_number argument to identify which cell you are annotating.
+Skip trivial cells (bare include-book, in-package, or very short boilerplate).
+Keep each summary to a few sentences.  Be precise and use ACL2 terminology correctly.
+{continuation_section}
+--- Cells ---
+{cells_text}"""
 
 NOTEBOOK_CHUNK_PROMPT = """\
 /no_think
 You are summarizing a group of ACL2 notebook cells.  Below are individual \
 cell summaries from the same notebook file ``{source_file}``.
 
-Combine them into a single JSON object with up to three fields:
-- "what": What this group of definitions/theorems accomplishes.
-- "why": The broader purpose or goal.
-- "how": How to use the facilities defined here.
+Call each tool once to summarize this group:
+- summary_what: What this group of definitions/theorems accomplishes.
+- summary_why: The broader purpose or goal.
+- summary_how: How to use the facilities defined here.
 
-Keep each field to 2-4 sentences.  Be precise.
+Keep each to 2-4 sentences.  Be precise.
 
 --- Cell Summaries ---
-{cell_summaries}
-
-Respond with ONLY a valid JSON object, no markdown fences."""
+{cell_summaries}"""
 
 NOTEBOOK_REDUCE_PROMPT = """\
 /no_think
 You are summarizing an ACL2 notebook file ``{source_file}``.
 Below are intermediate summaries from different sections of this notebook.
 
-Combine them into a single JSON object with three fields:
-- "what": What this file defines or proves, overall.
-- "why": The purpose of this file in the library.
-- "how": How to use the facilities it provides (include-book path, key functions/macros).
+Call each tool once to produce the combined summary:
+- summary_what: What this file defines or proves, overall.
+- summary_why: The purpose of this file in the library.
+- summary_how: How to use the facilities it provides (include-book path, key functions/macros).
 
-Keep each field to 2-4 sentences.
+Keep each to 2-4 sentences.
 
 --- Section Summaries ---
-{section_summaries}
-
-Respond with ONLY a valid JSON object, no markdown fences."""
+{section_summaries}"""
 
 DIRECTORY_REDUCE_PROMPT = """\
 /no_think
 You are summarizing the ACL2 library directory ``{directory}``.
 Below are summaries of the notebooks and subdirectories it contains.
 
-Combine them into a single JSON object with three fields:
-- "what": What this directory provides.
-- "why": Its purpose in the broader ACL2 library.
-- "how": How to use it (key include-book paths, primary entry points).
+Call each tool once to produce the combined summary:
+- summary_what: What this directory provides.
+- summary_why: Its purpose in the broader ACL2 library.
+- summary_how: How to use it (key include-book paths, primary entry points).
 
-Keep each field to 3-5 sentences.
+Keep each to 3-5 sentences.
 
 --- Contents ---
-{contents}
-
-Respond with ONLY a valid JSON object, no markdown fences."""
-
-
-# ─── Heuristic cell filter ──────────────────────────────────────────
-
-
-def cell_is_trivial(cell: CellRecord) -> bool:
-    """Return True if the cell is too trivial to summarize."""
-    if cell.is_portcullis:
-        return True
-
-    content = (cell.code_text or "") + (cell.comment_text or "")
-    content_stripped = content.strip()
-
-    if not content_stripped:
-        return True
-
-    if len(content_stripped) < 40:
-        return True
-
-    # Common boilerplate forms.
-    lower = content_stripped.lower()
-    if lower.startswith("(include-book") or lower.startswith("(in-package"):
-        return True
-    if lower.startswith("(local (include-book"):
-        return True
-
-    return False
+{contents}"""
 
 
 # ─── Weaviate data fetching ──────────────────────────────────────────
@@ -391,83 +421,126 @@ def _fetch_all_notebook_sources(
 # ─── LLM invocation (with caching) ──────────────────────────────────
 
 
-async def _cached_llm_call(
+def _summary_tools_to_result(tool_calls: list[dict]) -> SummaryResult:
+    """Convert summary tool calls into a SummaryResult."""
+    result = SummaryResult()
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        text = tc.get("args", {}).get("summary", "")
+        if name == "SummaryWhat":
+            result.what = text
+        elif name == "SummaryWhy":
+            result.why = text
+        elif name == "SummaryHow":
+            result.how = text
+    return result
+
+
+# ─── Phase 1: Cell Summaries (batched tool calling) ─────────────────
+
+
+def _build_batch_cells_text(cells: list[CellRecord]) -> str:
+    """Format a batch of cells for the batch prompt."""
+    parts: list[str] = []
+    for c in cells:
+        content = c.code_text if c.cell_type == "code" else c.comment_text
+        if not content:
+            content = c.code_text or c.comment_text or "(empty)"
+        header = f"[Cell {c.cell_index}] ({c.cell_type}, package: {c.package or 'ACL2'})"
+        if c.symbol_names:
+            syms = ", ".join(
+                f"{n} ({k})" for n, k in zip(c.symbol_names, c.symbol_kinds)
+            )
+            header += f"\nDefines: {syms}"
+        parts.append(f"{header}\n{content}")
+    return "\n\n".join(parts)
+
+
+def _batch_cells_by_size(
+    cells: list[CellRecord], max_bytes: int,
+) -> list[list[CellRecord]]:
+    """Split cells into batches whose combined text fits within *max_bytes*."""
+    batches: list[list[CellRecord]] = []
+    current_batch: list[CellRecord] = []
+    current_size = 0
+
+    for cell in cells:
+        content = cell.code_text if cell.cell_type == "code" else cell.comment_text
+        cell_size = len((content or "").encode("utf-8")) + 120  # header overhead
+        if current_batch and current_size + cell_size > max_bytes:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+        current_batch.append(cell)
+        current_size += cell_size
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+async def _cached_tool_call(
     prompt: str,
-    llm: ChatOpenAI,
+    llm_with_tools,
     model: str,
     cache: LLMCache | None,
     sem: asyncio.Semaphore,
-) -> str:
-    """Invoke the LLM with SQLite caching and semaphore-limited concurrency."""
-    # Check cache first (no semaphore needed for a local SQLite read).
+) -> tuple[list[dict], bool]:
+    """Invoke the LLM with tool calling and SQLite caching.
+
+    Returns ``(tool_calls, was_cached)`` where *tool_calls* is a list
+    of dicts: ``[{"name": ..., "args": {...}}, ...]``.
+    """
     if cache is not None:
         cached = cache.get(prompt)
         if cached is not None:
-            return cached
+            return json.loads(cached), True
 
     async with sem:
-        response = await llm.ainvoke(prompt)
-        text = response.content if hasattr(response, "content") else str(response)
+        response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
 
-    # Store in cache.
+    tool_calls = [
+        {"name": tc["name"], "args": tc["args"]}
+        for tc in (response.tool_calls or [])
+    ]
+
     if cache is not None:
-        cache.put(prompt, text, model)
+        cache.put(prompt, json.dumps(tool_calls), model)
 
-    return text
-
-
-def _parse_summary_json(raw: str) -> SummaryResult:
-    """Parse a JSON summary response, tolerating markdown fences and <think> blocks."""
-    text = raw.strip()
-    # Strip <think>...</think> blocks (Qwen3 reasoning mode leakage).
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    # Strip markdown code fences if present.
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text)
-    try:
-        d = json.loads(text)
-    except json.JSONDecodeError:
-        log.warning("Failed to parse LLM JSON: %.120s...", text)
-        # Attempt to salvage: treat entire text as "what"
-        return SummaryResult(what=raw.strip())
-
-    return SummaryResult(
-        what=d.get("what", ""),
-        why=d.get("why", ""),
-        how=d.get("how", ""),
-    )
+    return tool_calls, False
 
 
-# ─── Phase 1: Cell Summaries ────────────────────────────────────────
+def _tool_calls_to_summaries(
+    tool_calls: list[dict],
+) -> tuple[dict[int, SummaryResult], str]:
+    """Parse tool-call dicts into per-cell SummaryResults and continuation context."""
+    summaries: dict[int, SummaryResult] = {}
+    continuation = ""
 
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        args = tc.get("args", {})
 
-def _build_cell_prompt(cell: CellRecord) -> str:
-    """Build the LLM prompt for a single cell."""
-    content = cell.code_text if cell.cell_type == "code" else cell.comment_text
-    if not content:
-        content = cell.code_text or cell.comment_text or "(empty cell)"
+        if name == "ContinuationContext":
+            continuation = args.get("context", "")
+            continue
 
-    symbols_section = ""
-    if cell.symbol_names:
-        parts = []
-        for name, kind in zip(cell.symbol_names, cell.symbol_kinds):
-            parts.append(f"  {name} ({kind})")
-        symbols_section = "Symbols defined:\n" + "\n".join(parts)
+        cell_num = args.get("cell_number")
+        if cell_num is None:
+            continue
 
-    deps_section = ""
-    if cell.dep_names:
-        deps_section = "Dependencies: " + ", ".join(cell.dep_names[:30])
-        if len(cell.dep_names) > 30:
-            deps_section += f" ... and {len(cell.dep_names) - 30} more"
+        if cell_num not in summaries:
+            summaries[cell_num] = SummaryResult()
 
-    return CELL_SUMMARY_PROMPT.format(
-        package=cell.package or "ACL2",
-        cell_type=cell.cell_type,
-        symbols_section=symbols_section,
-        deps_section=deps_section,
-        content=content[:4000],  # Truncate very large cells
-    )
+        text = args.get("summary", "")
+        if name == "ReportWhat":
+            summaries[cell_num].what = text
+        elif name == "ReportWhy":
+            summaries[cell_num].why = text
+        elif name == "ReportHow":
+            summaries[cell_num].how = text
+
+    return summaries, continuation
 
 
 async def summarize_cells(
@@ -479,16 +552,21 @@ async def summarize_cells(
     sem: asyncio.Semaphore,
     batch_size: int,
     checkpoint: dict,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
     dry_run: bool = False,
 ) -> dict[str, list[tuple[int, SummaryResult]]]:
-    """Phase 1: Generate cell-level summaries.
+    """Phase 1: Generate cell-level summaries via batched tool calling.
 
-    Returns a dict mapping notebook_source → list of (cell_index, SummaryResult).
+    Cells are grouped into batches that fit within *context_size* bytes.
+    The LLM receives each batch and calls report_what / report_why /
+    report_how tools for substantive cells.  A continuation context is
+    passed between batches within the same notebook.
     """
+    llm_with_tools = llm.bind_tools(CELL_TOOLS) if llm else None
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
 
     total_cells = 0
-    total_qualifying = 0
+    total_batches = 0
     total_skipped_cp = 0
     total_cached = 0
     total_llm = 0
@@ -496,109 +574,135 @@ async def summarize_cells(
 
     for nb_idx, nb_src in enumerate(notebook_sources, 1):
         cells = _fetch_cells_for_notebook(client, nb_src)
-        qualifying = [c for c in cells if not cell_is_trivial(c)]
         total_cells += len(cells)
-        total_qualifying += len(qualifying)
 
         if nb_idx % 50 == 0 or nb_idx == len(notebook_sources):
-            log.info("  Cell scan: %d/%d notebooks, %d cells, %d qualifying",
-                     nb_idx, len(notebook_sources), total_cells, total_qualifying)
+            log.info(
+                "  Cell scan: %d/%d notebooks, %d cells, %d batches so far",
+                nb_idx, len(notebook_sources), total_cells, total_batches,
+            )
 
         if dry_run:
-            # Record qualifying count but skip LLM calls.
             all_results[nb_src] = [
-                (c.cell_index, SummaryResult()) for c in qualifying
+                (c.cell_index, SummaryResult()) for c in cells
             ]
             continue
 
-        # Build tasks for qualifying cells not yet checkpointed.
-        tasks: list[tuple[CellRecord, str]] = []
-        for cell in qualifying:
-            ref_key = f"{nb_src}:{cell.cell_index}"
-            if ref_key in checkpoint.get("cells", set()):
-                total_skipped_cp += 1
-                continue
-            prompt = _build_cell_prompt(cell)
-            tasks.append((cell, prompt))
-
-        if not tasks:
-            # All cells already done; reconstruct from Weaviate later if needed
-            all_results[nb_src] = []
-            continue
-
-        # Run LLM calls concurrently.
-        async def _do_cell(cell_rec: CellRecord, prompt: str) -> tuple[int, SummaryResult]:
-            raw = await _cached_llm_call(prompt, llm, model, cache, sem)
-            return cell_rec.cell_index, _parse_summary_json(raw)
-
-        coros = [_do_cell(c, p) for c, p in tasks]
-        results = await asyncio.gather(*coros, return_exceptions=True)
+        # Split cells into context-sized batches.
+        batches = _batch_cells_by_size(cells, context_size)
+        total_batches += len(batches)
 
         nb_results: list[tuple[int, SummaryResult]] = []
-        upsert_batch: list[dict] = []
+        continuation_context = ""
 
-        for i, res in enumerate(results):
-            cell_rec = tasks[i][0]
-            ref_key = f"{nb_src}:{cell_rec.cell_index}"
+        for batch_cells in batches:
+            batch_key = (
+                f"{nb_src}:batch:"
+                f"{batch_cells[0].cell_index}-{batch_cells[-1].cell_index}"
+            )
 
-            if isinstance(res, Exception):
-                log.error("Cell %s failed: %s", ref_key, res)
+            # Check checkpoint.
+            if batch_key in checkpoint.get("cell_batches", set()):
+                total_skipped_cp += 1
                 continue
 
-            cell_idx, summary = res
-            nb_results.append((cell_idx, summary))
+            cells_text = _build_batch_cells_text(batch_cells)
 
-            # Track cache hit vs LLM call
-            if cache and cache.get(tasks[i][1]) is not None:
+            cont_section = ""
+            if continuation_context:
+                cont_section = (
+                    "\n--- Context from previous cells ---\n"
+                    + continuation_context + "\n"
+                )
+
+            prompt = BATCH_CELL_PROMPT.format(
+                source_file=nb_src,
+                continuation_section=cont_section,
+                cells_text=cells_text,
+            )
+
+            tool_calls, was_cached = await _cached_tool_call(
+                prompt, llm_with_tools, model, cache, sem,
+            )
+            if was_cached:
                 total_cached += 1
             else:
                 total_llm += 1
 
-            # Prepare Weaviate upsert.
-            uuid = str(generate_uuid5(f"summary:cell:{ref_key}"))
-            nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))
-            cell_uuid = str(generate_uuid5(f"cell:{nb_src}:{cell_idx}"))
+            summaries, continuation_context = _tool_calls_to_summaries(
+                tool_calls,
+            )
 
-            upsert_batch.append({
-                "uuid": uuid,
-                "properties": {
-                    "scope": "cell",
-                    "ref_key": ref_key,
-                    "what_summary": summary.what or "",
-                    "why_summary": summary.why or "",
-                    "how_summary": summary.how or "",
-                    "source_file": nb_src,
-                    "cell_index": cell_idx,
-                    "directory": str(Path(nb_src).parent),
-                    "symbol_names": cell_rec.symbol_names,
-                },
-                "references": {
-                    "sourceNotebook": nb_uuid,
-                    "sourceCell": cell_uuid,
-                },
-            })
+            # Merge into notebook results.
+            for cell_idx, summary in summaries.items():
+                nb_results.append((cell_idx, summary))
 
-            # Mark in checkpoint.
-            checkpoint.setdefault("cells", set()).add(ref_key)
-
-        # Batch upsert to Weaviate.
-        if upsert_batch and summary_coll is not None:
-            with summary_coll.batch.fixed_size(batch_size=batch_size) as batch:
-                for item in upsert_batch:
-                    batch.add_object(
-                        properties=item["properties"],
-                        uuid=item["uuid"],
-                        references=item["references"],
+            # Upsert to Weaviate.
+            if summary_coll is not None and summaries:
+                upsert_items: list[dict] = []
+                for cell_idx, summary in summaries.items():
+                    ref_key = f"{nb_src}:{cell_idx}"
+                    uuid = str(generate_uuid5(f"summary:cell:{ref_key}"))
+                    nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))
+                    cell_uuid = str(
+                        generate_uuid5(f"cell:{nb_src}:{cell_idx}")
                     )
+                    cell_rec = next(
+                        (c for c in batch_cells if c.cell_index == cell_idx),
+                        None,
+                    )
+                    upsert_items.append({
+                        "uuid": uuid,
+                        "properties": {
+                            "scope": "cell",
+                            "ref_key": ref_key,
+                            "what_summary": summary.what or "",
+                            "why_summary": summary.why or "",
+                            "how_summary": summary.how or "",
+                            "source_file": nb_src,
+                            "cell_index": cell_idx,
+                            "directory": str(Path(nb_src).parent),
+                            "symbol_names": (
+                                cell_rec.symbol_names if cell_rec else []
+                            ),
+                        },
+                        "references": {
+                            "sourceNotebook": nb_uuid,
+                            "sourceCell": cell_uuid,
+                        },
+                    })
+
+                    # Mark cell in checkpoint (Phase 2 compatibility).
+                    checkpoint.setdefault("cells", set()).add(ref_key)
+
+                with summary_coll.batch.fixed_size(
+                    batch_size=batch_size,
+                ) as wb:
+                    for item in upsert_items:
+                        wb.add_object(
+                            properties=item["properties"],
+                            uuid=item["uuid"],
+                            references=item["references"],
+                        )
+
+            # Mark batch in checkpoint.
+            checkpoint.setdefault("cell_batches", set()).add(batch_key)
 
         all_results[nb_src] = nb_results
 
         if nb_idx % 10 == 0:
-            log.info("  Cells: %d/%d notebooks processed, %d cached, %d LLM calls",
-                     nb_idx, len(notebook_sources), total_cached, total_llm)
+            log.info(
+                "  Cells: %d/%d notebooks, %d batches, %d cached, %d LLM",
+                nb_idx, len(notebook_sources), total_batches,
+                total_cached, total_llm,
+            )
 
-    log.info("Phase 1 complete: %d cells, %d qualifying, %d checkpointed, %d cached, %d LLM calls",
-             total_cells, total_qualifying, total_skipped_cp, total_cached, total_llm)
+    log.info(
+        "Phase 1 complete: %d cells across %d batches, "
+        "%d checkpointed, %d cached, %d LLM calls",
+        total_cells, total_batches, total_skipped_cp,
+        total_cached, total_llm,
+    )
 
     return all_results
 
@@ -655,14 +759,18 @@ async def summarize_notebooks(
         chunks = _chunk_list(non_empty, NOTEBOOK_CHUNK_SIZE)
         intermediates: list[SummaryResult] = []
 
+        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
+
         for chunk in chunks:
             cell_text = _format_cell_summaries(chunk)
             prompt = NOTEBOOK_CHUNK_PROMPT.format(
                 source_file=nb_src,
                 cell_summaries=cell_text,
             )
-            raw = await _cached_llm_call(prompt, llm, model, cache, sem)
-            intermediates.append(_parse_summary_json(raw))
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            intermediates.append(_summary_tools_to_result(tcs))
 
         # Reduce: combine intermediates (or use directly if only one chunk).
         if len(intermediates) == 1:
@@ -673,8 +781,10 @@ async def summarize_notebooks(
                 source_file=nb_src,
                 section_summaries=section_text,
             )
-            raw = await _cached_llm_call(prompt, llm, model, cache, sem)
-            final = _parse_summary_json(raw)
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            final = _summary_tools_to_result(tcs)
 
         nb_summaries[nb_src] = final
 
@@ -865,12 +975,15 @@ async def summarize_directories(
             continue
 
         # Build and invoke prompt.
+        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
         prompt = DIRECTORY_REDUCE_PROMPT.format(
             directory=directory,
             contents="\n\n".join(contents_parts),
         )
-        raw = await _cached_llm_call(prompt, llm, model, cache, sem)
-        final = _parse_summary_json(raw)
+        tcs, _ = await _cached_tool_call(
+            prompt, llm_with_summary_tools, model, cache, sem,
+        )
+        final = _summary_tools_to_result(tcs)
         dir_summaries[directory] = final
 
         # Upsert to Weaviate.
@@ -1019,7 +1132,7 @@ def _load_checkpoint(path: str) -> dict:
         with open(path) as f:
             data = json.load(f)
         # Convert lists back to sets for fast lookup.
-        for key in ("cells", "notebooks", "directories"):
+        for key in ("cells", "notebooks", "directories", "cell_batches"):
             if key in data:
                 data[key] = set(data[key])
         return data
@@ -1049,7 +1162,7 @@ def _dry_run_report(
     cell_summaries: dict[str, list[tuple[int, SummaryResult]]],
 ) -> None:
     """Print a summary of what would be processed."""
-    total_qualifying = sum(len(v) for v in cell_summaries.values())
+    total_cells = sum(len(v) for v in cell_summaries.values())
 
     # Directory count.
     all_dirs: set[str] = set()
@@ -1061,10 +1174,10 @@ def _dry_run_report(
 
     print("\n=== DRY-RUN SUMMARY ===")
     print(f"Notebooks:            {len(notebook_sources)}")
-    print(f"Qualifying cells:     {total_qualifying}")
+    print(f"Total cells:          {total_cells}")
     print(f"Directories:          {len(all_dirs)}")
     print(f"Est. LLM calls:")
-    print(f"  Cell summaries:     {total_qualifying}")
+    print(f"  Cell batches:       (depends on --context-size)")
     # Rough estimate: 1 map call per NOTEBOOK_CHUNK_SIZE cells + 1 reduce per notebook
     map_calls = sum(
         max(1, len(v) // NOTEBOOK_CHUNK_SIZE + (1 if len(v) % NOTEBOOK_CHUNK_SIZE else 0))
@@ -1075,7 +1188,7 @@ def _dry_run_report(
     print(f"  Notebook map:       {map_calls}")
     print(f"  Notebook reduce:    {reduce_calls}")
     print(f"  Directory reduce:   {len(all_dirs)}")
-    print(f"  Total (est.):       {total_qualifying + map_calls + reduce_calls + len(all_dirs)}")
+    print(f"  Total (est.):       (cell batches + {map_calls} + {reduce_calls} + {len(all_dirs)})")
     print()
 
 
@@ -1131,6 +1244,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-j", "--jobs", type=int, default=DEFAULT_JOBS,
         help=f"Concurrent LLM requests (default: {DEFAULT_JOBS})",
+    )
+    p.add_argument(
+        "--context-size", type=int, default=DEFAULT_CONTEXT_SIZE,
+        help=f"Max batch size in bytes for cell groups (default: {DEFAULT_CONTEXT_SIZE})",
     )
     p.add_argument(
         "--recreate", action="store_true",
@@ -1249,7 +1366,9 @@ async def async_main(args: argparse.Namespace) -> int:
             log.info("=== Phase 1: Cell Summaries ===")
             cell_summaries = await summarize_cells(
                 client, notebook_sources, llm, model, cache, sem,
-                args.batch_size, checkpoint, args.dry_run,
+                args.batch_size, checkpoint,
+                context_size=args.context_size,
+                dry_run=args.dry_run,
             )
 
         # ── Phase 2: Notebook summaries ──────────────────────────────
