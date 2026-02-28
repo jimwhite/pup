@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Search: {{ q }} — ACL2 KG{% endblock %}
+
+{% block content %}
+<h5 class="mb-3">
+  {{ count }} result{{ 's' if count != 1 }} for
+  <em>"{{ q }}"</em>
+  <span class="text-muted small">({{ mode }} · {{ target }})</span>
+</h5>
+
+{% if not results %}
+<p class="text-muted">No results found. Try a different query or search mode.</p>
+{% endif %}
+
+<div class="list-group">
+  {% for r in results %}
+
+    {% if r.type == 'symbol' %}
+    <a href="{{ url_for('symbol_detail', qn=r.qn) }}"
+       class="list-group-item list-group-item-action d-flex justify-content-between align-items-start">
+      <div>
+        <span class="fw-bold font-monospace">{{ r.qn }}</span>
+        <span class="badge bg-{{ kind_color(r.kind) }} kind-badge ms-2">{{ r.kind }}</span>
+      </div>
+      {% if r.distance is not none %}
+      <span class="distance">d={{ "%.3f"|format(r.distance) }}</span>
+      {% endif %}
+    </a>
+
+    {% else %}{# code or comment cell #}
+    <a href="{{ url_for('notebook_view', source_file=r.notebook, cell=r.cell_index) }}"
+       class="list-group-item list-group-item-action">
+      <div class="d-flex justify-content-between">
+        <span>
+          <span class="nb-path">{{ r.notebook }}</span>
+          · cell {{ r.cell_index }}
+          <span class="badge bg-{{ 'primary' if r.cell_type == 'code' else 'success' }} kind-badge ms-1">{{ r.cell_type }}</span>
+        </span>
+        {% if r.distance is not none %}
+        <span class="distance">d={{ "%.3f"|format(r.distance) }}</span>
+        {% endif %}
+      </div>
+      <pre class="mt-1 small" style="max-height:4.5rem; overflow:hidden;"><code class="language-lisp">{{ r.preview }}</code></pre>
+    </a>
+    {% endif %}
+
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Notebooks — ACL2 KG{% endblock %}
+
+{% block content %}
+<h4>Notebooks</h4>
+
+<form class="mb-3" method="get">
+  <div class="input-group" style="max-width: 500px;">
+    <input type="text" class="form-control" name="q"
+           placeholder="Filter by path (e.g. kestrel/bv)" value="{{ q }}"
+           autofocus>
+    <button class="btn btn-primary" type="submit">Filter</button>
+    {% if q %}
+    <a class="btn btn-outline-secondary" href="/notebooks">Clear</a>
+    {% endif %}
+  </div>
+</form>
+
+{% if notebooks %}
+<p class="text-muted">{{ notebooks|length }} notebook{{ 's' if notebooks|length != 1 }}</p>
+<div class="list-group">
+  {% for nb in notebooks %}
+  <a href="{{ url_for('notebook_view', source_file=nb.source_file) }}"
+     class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+    <span class="nb-path">{{ nb.source_file }}</span>
+    <span class="text-muted small">
+      {{ nb.cell_count }} cells ({{ nb.code_cell_count }} code)
+      {% if nb.is_bootstrap %}<span class="badge bg-danger ms-1">bootstrap</span>{% endif %}
+    </span>
+  </a>
+  {% endfor %}
+</div>
+{% elif q %}
+<p class="text-muted">No notebooks matching "{{ q }}"</p>
+{% else %}
+<p class="text-muted">Enter a path fragment to find notebooks, or browse some examples:</p>
+<div class="d-flex flex-wrap gap-2">
+  <a class="btn btn-sm btn-outline-primary" href="/notebooks?q=defsort">defsort</a>
+  <a class="btn btn-sm btn-outline-primary" href="/notebooks?q=kestrel/bv">kestrel/bv</a>
+  <a class="btn btn-sm btn-outline-primary" href="/notebooks?q=crypto">crypto</a>
+  <a class="btn btn-sm btn-outline-primary" href="/notebooks?q=arithmetic">arithmetic</a>
+  <a class="btn btn-sm btn-outline-primary" href="/notebooks?q=std/lists">std/lists</a>
+</div>
+{% endif %}
+{% endblock %}

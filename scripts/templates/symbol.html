@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ symbol.qualified_name }} — ACL2 KG{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/">Home</a></li>
+    <li class="breadcrumb-item active">Symbol</li>
+  </ol>
+</nav>
+
+<h4 class="font-monospace">
+  {{ symbol.qualified_name }}
+  <span class="badge bg-{{ kind_color(symbol.kind) }}">{{ symbol.kind }}</span>
+  {% if symbol.is_operator %}<span class="badge bg-secondary">operator</span>{% endif %}
+</h4>
+
+<table class="table table-sm" style="max-width: 400px;">
+  <tr><th>Package</th><td><code>{{ symbol.package }}</code></td></tr>
+  <tr><th>Name</th><td><code>{{ symbol.name }}</code></td></tr>
+  <tr><th>Kind</th><td>{{ symbol.kind }}</td></tr>
+</table>
+
+{% if defining_cell %}
+<h5 class="mt-4">Definition</h5>
+<p>
+  Defined in
+  <a href="{{ url_for('notebook_view', source_file=defining_cell.notebook, cell=defining_cell.cell_index) }}">
+    <span class="nb-path">{{ defining_cell.notebook }}</span> · cell {{ defining_cell.cell_index }}
+  </a>
+</p>
+{% if defining_cell.code %}
+<pre><code class="language-lisp">{{ defining_cell.code }}</code></pre>
+{% endif %}
+{% endif %}
+
+{% if deps %}
+<h5 class="mt-4">Dependencies ({{ deps|length }})</h5>
+<div class="dep-grid">
+  {% for d in deps %}
+  <a href="{{ url_for('symbol_detail', qn=d.qn) }}"
+     class="badge bg-{{ kind_color(d.kind) }} symbol-link">{{ d.qn }}</a>
+  {% endfor %}
+</div>
+{% else %}
+<h5 class="mt-4 text-muted">No dependencies recorded</h5>
+{% endif %}
+
+{% if reverse_deps %}
+<h5 class="mt-4">Used By ({{ reverse_deps|length }}{% if reverse_deps|length >= 50 %}+{% endif %})</h5>
+<div class="dep-grid">
+  {% for d in reverse_deps %}
+  <a href="{{ url_for('symbol_detail', qn=d.qn) }}"
+     class="badge bg-{{ kind_color(d.kind) }} symbol-link">{{ d.qn }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<hr class="mt-4">
+<div class="small text-muted">
+  Search for this symbol:
+  <a href="{{ url_for('search', q=symbol.name, target='symbol', mode='keyword') }}">keyword</a> ·
+  <a href="{{ url_for('search', q=symbol.qualified_name, target='symbol', mode='semantic') }}">semantic</a>
+</div>
+{% endblock %}

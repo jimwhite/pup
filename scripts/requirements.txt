@@ -1,2 +1,3 @@
 weaviate-client>=4.5
 nbformat>=5.10
+flask>=3.0

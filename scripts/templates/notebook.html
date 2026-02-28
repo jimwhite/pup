@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}{{ source_file }} — ACL2 KG{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/">Home</a></li>
+    <li class="breadcrumb-item"><a href="/notebooks">Notebooks</a></li>
+    <li class="breadcrumb-item active nb-path">{{ source_file }}</li>
+  </ol>
+</nav>
+
+<h4 class="nb-path">{{ source_file }}</h4>
+
+{% if notebook %}
+<div class="mb-3 text-muted small">
+  {{ notebook.cell_count }} cells ({{ notebook.code_cell_count }} code)
+  {% if notebook.is_bootstrap %} · <span class="badge bg-danger">bootstrap</span>{% endif %}
+  {% if notebook.acl2_version %} · ACL2 {{ notebook.acl2_version }}{% endif %}
+</div>
+{% endif %}
+
+<div class="mb-3 small">
+  <strong>Jump to cell:</strong>
+  {% for cell in cells %}
+  <a href="#cell-{{ cell.index }}"
+     class="me-1{% if cell.type == 'code' %} text-primary{% else %} text-success{% endif %}"
+     title="{{ cell.type }}{% if cell.defined_symbols %} — defines {{ cell.defined_symbols|length }} symbol(s){% endif %}">{{ cell.index }}</a>
+  {% endfor %}
+</div>
+
+{% for cell in cells %}
+<div id="cell-{{ cell.index }}"
+     class="card cell-card {{ cell.type }}{% if highlight == cell.index %} highlight{% endif %}{% if cell.is_portcullis %} portcullis{% endif %} mb-2">
+  <div class="card-header cell-header py-1 d-flex justify-content-between align-items-start">
+    <span>
+      <strong>[{{ cell.index }}]</strong> {{ cell.type }}
+      {% if cell.package %}<span class="text-muted ms-2">{{ cell.package }}</span>{% endif %}
+      {% if cell.is_portcullis %}<span class="badge bg-danger ms-1">portcullis</span>{% endif %}
+    </span>
+    {% if cell.defined_symbols %}
+    <span class="dep-grid">
+      {% for s in cell.defined_symbols %}
+      <a href="{{ url_for('symbol_detail', qn=s.qn) }}"
+         class="badge bg-{{ kind_color(s.kind) }} symbol-link"
+         title="{{ s.kind }}">{{ s.qn }}</a>
+      {% endfor %}
+    </span>
+    {% endif %}
+  </div>
+  <div class="card-body p-2">
+    {% if cell.type == 'code' and cell.code_text %}
+    <pre><code class="language-lisp">{{ cell.code_text }}</code></pre>
+    {% elif cell.comment_text %}
+    <pre><code>{{ cell.comment_text }}</code></pre>
+    {% else %}
+    <p class="text-muted mb-0"><em>(empty cell)</em></p>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+
+{% if not cells %}
+<p class="text-muted">No cells found for this notebook.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Scroll to highlighted cell on load
+  const hl = document.querySelector('.cell-card.highlight');
+  if (hl) {
+    setTimeout(() => hl.scrollIntoView({behavior: 'smooth', block: 'center'}), 200);
+  }
+</script>
+{% endblock %}

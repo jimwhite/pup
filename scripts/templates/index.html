@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}ACL2 KG Browser — Home{% endblock %}
+
+{% block content %}
+<h4 class="mb-3">Knowledge Graph Summary</h4>
+
+<div class="d-flex flex-wrap gap-3 mb-4">
+  <div class="card stats-card">
+    <div class="card-body text-center">
+      <h5 class="card-title">{{ stats.ACL2Notebook | commas }}</h5>
+      <p class="card-text text-muted mb-0">Notebooks</p>
+    </div>
+  </div>
+  <div class="card stats-card">
+    <div class="card-body text-center">
+      <h5 class="card-title">{{ stats.ACL2Cell | commas }}</h5>
+      <p class="card-text text-muted mb-0">Cells</p>
+    </div>
+  </div>
+  <div class="card stats-card">
+    <div class="card-body text-center">
+      <h5 class="card-title">{{ stats.ACL2Symbol | commas }}</h5>
+      <p class="card-text text-muted mb-0">Symbols</p>
+    </div>
+  </div>
+</div>
+
+<h5>Symbol Kinds</h5>
+<table class="table table-sm table-striped" style="max-width: 400px;">
+  <thead><tr><th>Kind</th><th class="text-end">Count</th></tr></thead>
+  <tbody>
+    {% for kind, count in kinds %}
+    <tr>
+      <td><span class="badge bg-{{ kind_color(kind) }} kind-badge">{{ kind }}</span></td>
+      <td class="text-end">{{ count | commas }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h5 class="mt-4">Quick Searches</h5>
+<div class="d-flex flex-wrap gap-2">
+  <a class="btn btn-sm btn-outline-primary"
+     href="{{ url_for('search', q='sorting', target='symbol', mode='semantic') }}">sorting (symbols)</a>
+  <a class="btn btn-sm btn-outline-success"
+     href="{{ url_for('search', q='cryptographic hash', target='comment', mode='semantic') }}">cryptographic hash (comments)</a>
+  <a class="btn btn-sm btn-outline-info"
+     href="{{ url_for('search', q='binary search tree', target='code', mode='semantic') }}">binary search tree (code)</a>
+  <a class="btn btn-sm btn-outline-secondary"
+     href="{{ url_for('search', q='BITOR', target='symbol', mode='keyword') }}">BITOR (keyword)</a>
+  <a class="btn btn-sm btn-outline-secondary"
+     href="{{ url_for('search', q='defthm', target='code', mode='keyword') }}">defthm (keyword)</a>
+</div>
+{% endblock %}

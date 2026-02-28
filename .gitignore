@@ -4,6 +4,7 @@ manual/
 node_modules/
 data/
 .DS_Store
+scripts/.ingest_checkpoint.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
