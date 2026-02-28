@@ -147,3 +147,141 @@ UUID5 key: `"symbol:" + qualified_name`
 - **Symbol kind conflict resolution**: when the same `PACKAGE::NAME` appears across cells with different `kind` values, keep the most specific non-`unknown` value (precedence: `function` > `macro` > `theorem` > `constant` > `stobj` > `variable` > `raw-function` > `special-form` > `unknown`)
 - **`stdout` kept** in `ACL2Cell` despite being fetchable from `.ipynb` — ACL2 proof output text is valuable for search; can be omitted later if storage is a concern
 - **Checkpoint file** for restartability rather than querying Weaviate for existing objects — avoids expensive full-collection scans on large datasets
+
+# Results of first ingestion:
+
+=== Collection Counts ===
+  ACL2Notebook: 14,544
+  ACL2Cell: 507,645
+  ACL2Symbol: 403,038
+
+=== Sample Notebooks (first 15) ===
+  books/kestrel/acl2-arrays/aref1.lisp  cells=16  code=15  bootstrap=False
+  books/workshops/1999/graph/find-path3.lisp  cells=23  code=18  bootstrap=False
+  books/projects/rp-rewriter/eval-functions.lisp  cells=40  code=35  bootstrap=False
+  books/nonstd/nsa/nsa.lisp  cells=96  code=78  bootstrap=False
+  books/std/system/function-namep-tests.lisp  cells=13  code=11  bootstrap=False
+  books/workshops/2000/manolios/pipeline/pipeline/non-deterministic-systems/top/non-det-macros.lisp  cells=10  code=7  bootstrap=False
+  books/models/jvm/m6/BCV/bcv-functions.lisp  cells=24  code=19  bootstrap=False
+  books/kestrel/utilities/set-cbd-fn.lisp  cells=16  code=14  bootstrap=False
+  books/projects/paco/books/proveall-book.lisp  cells=4  code=3  bootstrap=False
+  books/kestrel/axe/call-axe-script.lisp  cells=13  code=11  bootstrap=False
+  books/projects/apply-model-2/ex2/evaluation-user-defs.lisp  cells=68  code=56  bootstrap=False
+  books/quicklisp/bundle/software/osicat-20220220-git/windows/windows.lisp  cells=58  code=49  bootstrap=False
+  books/kestrel/utilities/array-stobj.lisp  cells=13  code=11  bootstrap=False
+  books/std/system/fresh-logical-name-with-dollars-suffix-tests.lisp  cells=27  code=25  bootstrap=False
+  books/kestrel/ethereum/semaphore/json-to-r1cs/load-circom-json.lisp  cells=27  code=21  bootstrap=False
+
+=== Symbol Kinds Distribution ===
+  theorem: 146,967
+  unknown: 143,156
+  function: 85,716
+  macro: 19,498
+  constant: 5,721
+  raw-function: 1,272
+  stobj: 362
+  variable: 326
+  special-form: 20
+
+=== Cell Types Distribution ===
+  code: 437,186
+  markdown: 70,459
+
+=== Sample Symbols with Dependencies ===
+  ACL2::EXPAND-LAMBDAS-IN-TERMS-INDUCT-REMOVAL  kind=theorem  deps=13 in cell 36 of books/kestrel/terms-light/expand-lambdas-in-term-proofs.lisp
+  ACL2S::P21  kind=unknown  deps=0
+  ACL2::UPDATE-DATA-REGION-ALT-LEMMA-2  kind=unknown  deps=0
+  ACL2::MAKE-SBITS  kind=unknown  deps=0
+  STR::COERCION  kind=unknown  deps=0
+  ACL2::NTH-0-CONS  kind=theorem  deps=7 in cell 1553 of axioms.lisp
+  X86ISA::VPINSRQ  kind=unknown  deps=0
+  ACL2::STEP8-NEGATIVE  kind=unknown  deps=22 in cell 55 of books/kestrel/crypto/ecurve/twisted-edwards-closure-core.lisp
+  ACL2::INTEGERP-OF-BITOR  kind=theorem  deps=5 in cell 9 of books/kestrel/bv/bitor.lisp
+  IRV::IRV-BALLOT-P-CDR  kind=theorem  deps=19 in cell 20 of books/projects/irv/irv.lisp
+
+  === Collection Counts ===
+  ACL2Notebook: 14,544
+  ACL2Cell: 507,645
+  ACL2Symbol: 403,038
+
+  === Symbol Kinds ===
+  theorem: 146,967
+  unknown: 143,156
+  function: 85,716
+  macro: 19,498
+  constant: 5,721
+  raw-function: 1,272
+  stobj: 362
+  variable: 326
+  special-form: 20
+
+=== Cell Types ===
+  code: 437,186
+  markdown: 70,459
+
+=== Source Types ===
+  (none): 14,544
+
+  === Semantic Search: "sorting algorithm" ===
+  FLD::a * (b + c) = (a * b) + (a * c)  kind=theorem
+  ACL2::(disjointp (list x y)) --- disjoint super-ranges  kind=unknown
+  FUMON::(a * b) * c = a * (b * c)  kind=theorem
+  FLD::(a * b) * c = a * (b * c)  kind=theorem
+  FUTER::(a * b) * c = a * (b * c)  kind=theorem
+  FLD::(a + b) * c = (a * c) + (b * c)  kind=unknown
+  ACL2::(disjointp (list (range base1 offset1 length1) (range base2 offset2 length2))) --- 1  kind=unknown
+  ACL2::(disjointp (list (range base1 offset1 length1) (range base2 offset2 length2))) --- 2  kind=unknown
+  FUNPOL::(a + b) = 0 => a +Mo (b +Mo p) = p-lemma-2  kind=theorem
+  FLD::a + (b + c) = b + (a + c)  kind=theorem
+
+=== Semantic Search: "cryptographic hash" (comments) ===
+  [books/kestrel/crypto/keccak/keccak.lisp] cell 191:
+    ```
+;; --------------------------------
+;; Main bit-oriented hash functions.
+
+;; These are the functions that are closes...
+  [books/workshops/2000/sumners2/bdds/bdd-mgr.lisp] cell 59:
+    ```
+;;;; END data structure functions ;;;;
+
+#|--------------------------------------------------------------------------...
+  [books/kestrel/crypto/sha-2/sha-224.lisp] cell 3:
+    ```
+;A formal spec for the SHA-224 hash function, which is standardized
+;; in FIPS PUB 180-4.  See:
+;; http://nvlpubs.ni...
+  [books/workshops/2009/sumners/support/kas.lisp] cell 325:
+    ```
+;; The following is the ratio from entries in the unique node hash-table and
+;; the memo-table. Since we reuse the h...
+  [bdd.lisp] cell 58:
+    ```
+; Having found the bucket associated with the hash-index, here is how
+; we search it.
+```
+
+=== Semantic Search: "binary search tree" (code) ===
+  [books/kestrel/data/treeset/internal/bst.lisp] cell 82:
+    (define bstp
+  ((tree treep))
+  (declare (xargs :type-prescription (booleanp (bstp tree))))
+  :parents (tree)
+  :short "...
+  [books/kestrel/data/treeset/internal/in.lisp] cell 80:
+    (defrule tree-search-in-becomes-tree-in-when
+  (implies (bstp tree)
+           (equal (tree-search-in x tree)
+          ...
+  [books/meta/term-defuns.lisp] cell 14:
+    (defun binary-op_tree (binary-op-name constant-name fix-name lst)
+  (declare (xargs :guard (and (symbolp binary-op-name)...
+  [books/projects/taspi/tree-generation/tree-gen-helper/basics.lisp] cell 15:
+    ;Returns list of all possible rooted trees from adding x to
+;; rooted binary tree tree
+(defun addTaxa-rooted (x tree)
+  ...
+  [books/projects/taspi/tree-generation/heuristics/spr.lisp] cell 5:
+    ;takes a well-formed piece (which means it is a binary tree,
+; whose attaching point is defined by the root), with an un...
+
