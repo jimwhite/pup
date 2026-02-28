@@ -400,18 +400,29 @@ def _fetch_cells_for_notebook(
 def _fetch_all_notebook_sources(
     client: weaviate.WeaviateClient,
     source_dir: str | None = None,
+    no_recurse: bool = False,
 ) -> list[str]:
-    """Return all notebook source_file values, optionally filtered by prefix."""
+    """Return all notebook source_file values, optionally filtered by prefix.
+
+    If *no_recurse* is True and *source_dir* is set, only return notebooks
+    whose parent directory exactly matches *source_dir* (no subdirectories).
+    """
     nb_coll = client.collections.get(COLLECTION_NOTEBOOK)
     sources: list[str] = []
 
-    # Iterate all notebooks.
     for obj in nb_coll.iterator(
         return_properties=["source_file"],
     ):
         src = obj.properties.get("source_file", "")
-        if source_dir and not src.startswith(source_dir):
-            continue
+        if source_dir:
+            if no_recurse:
+                # Match only notebooks directly in source_dir
+                parent = str(Path(src).parent)
+                if parent != source_dir and parent != source_dir.rstrip("/"):
+                    continue
+            else:
+                if not src.startswith(source_dir):
+                    continue
         sources.append(src)
 
     sources.sort()
@@ -1210,6 +1221,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit to notebooks under this prefix (e.g. books/defsort)",
     )
     p.add_argument(
+        "--no-recurse", action="store_true",
+        help="Only process notebooks directly in --source-dir (no subdirectories)",
+    )
+    p.add_argument(
         "--weaviate-host", default=DEFAULT_WEAVIATE_HOST,
         help=f"Weaviate host (default: {DEFAULT_WEAVIATE_HOST})",
     )
@@ -1348,9 +1363,12 @@ async def async_main(args: argparse.Namespace) -> int:
         )
 
         # ── Discover notebooks ───────────────────────────────────────
-        notebook_sources = _fetch_all_notebook_sources(client, args.source_dir)
-        log.info("Found %d notebooks%s", len(notebook_sources),
-                 f" under {args.source_dir}" if args.source_dir else "")
+        notebook_sources = _fetch_all_notebook_sources(
+            client, args.source_dir, no_recurse=args.no_recurse,
+        )
+        log.info("Found %d notebooks%s%s", len(notebook_sources),
+                 f" under {args.source_dir}" if args.source_dir else "",
+                 " (no recurse)" if args.no_recurse else "")
 
         if not notebook_sources:
             log.warning("No notebooks found, nothing to do")
