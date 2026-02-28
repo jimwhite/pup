@@ -29,6 +29,13 @@
     <span class="nb-path">{{ defining_cell.notebook }}</span> · cell {{ defining_cell.cell_index }}
   </a>
 </p>
+{% if cell_summary %}
+<div class="summary-box mb-2">
+  {% if cell_summary.what %}<span class="what-label">What:</span> {{ cell_summary.what }}<br>{% endif %}
+  {% if cell_summary.why %}<span class="why-label">Why:</span> {{ cell_summary.why }}<br>{% endif %}
+  {% if cell_summary.how %}<span class="how-label">How:</span> {{ cell_summary.how }}{% endif %}
+</div>
+{% endif %}
 {% if defining_cell.code %}
 <pre><code class="language-lisp">{{ defining_cell.code }}</code></pre>
 {% endif %}

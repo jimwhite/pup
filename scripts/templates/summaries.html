@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Summaries — ACL2 KG{% endblock %}
+
+{% block content %}
+<h4>LLM Summaries</h4>
+
+{% if error %}
+<div class="alert alert-warning">{{ error }}</div>
+{% endif %}
+
+<form class="mb-3" method="get">
+  <div class="row g-2 align-items-end" style="max-width: 800px;">
+    <div class="col-sm-4">
+      <label class="form-label small">Semantic search</label>
+      <input type="text" class="form-control" name="q"
+             placeholder="e.g. sorting algorithm" value="{{ q }}" autofocus>
+    </div>
+    <div class="col-sm-2">
+      <label class="form-label small">Scope</label>
+      <select class="form-select" name="scope">
+        <option value="all"{%- if scope=='all' %} selected{% endif %}>All</option>
+        <option value="cell"{%- if scope=='cell' %} selected{% endif %}>Cell</option>
+        <option value="notebook"{%- if scope=='notebook' %} selected{% endif %}>Notebook</option>
+        <option value="directory"{%- if scope=='directory' %} selected{% endif %}>Directory</option>
+      </select>
+    </div>
+    <div class="col-sm-2">
+      <label class="form-label small">Vector</label>
+      <select class="form-select" name="vector">
+        <option value="what_vector"{%- if vector=='what_vector' %} selected{% endif %}>What</option>
+        <option value="why_vector"{%- if vector=='why_vector' %} selected{% endif %}>Why</option>
+        <option value="how_vector"{%- if vector=='how_vector' %} selected{% endif %}>How</option>
+      </select>
+    </div>
+    <div class="col-sm-2">
+      <button class="btn btn-primary w-100" type="submit">Search</button>
+    </div>
+    {% if q %}
+    <div class="col-sm-2">
+      <a class="btn btn-outline-secondary w-100" href="/summaries">Clear</a>
+    </div>
+    {% endif %}
+  </div>
+</form>
+
+{% if results %}
+<p class="text-muted mb-2">{{ count }} result{{ 's' if count != 1 }}</p>
+
+<div class="list-group">
+  {% for r in results %}
+  <div class="list-group-item">
+    <div class="d-flex justify-content-between align-items-start mb-1">
+      <div>
+        <span class="badge bg-{% if r.scope == 'cell' %}primary{% elif r.scope == 'notebook' %}success{% else %}info{% endif %} me-1">{{ r.scope }}</span>
+        {% if r.scope == 'cell' %}
+          <a href="{{ url_for('notebook_view', source_file=r.source_file, cell=r.cell_index) }}"
+             class="nb-path text-decoration-none">{{ r.source_file }} · cell {{ r.cell_index }}</a>
+        {% elif r.scope == 'notebook' %}
+          <a href="{{ url_for('notebook_view', source_file=r.source_file) }}"
+             class="nb-path text-decoration-none">{{ r.source_file }}</a>
+        {% else %}
+          <span class="nb-path">{{ r.directory }}</span>
+        {% endif %}
+      </div>
+      {% if r.distance is not none %}
+      <span class="distance">{{ "%.4f"|format(r.distance) }}</span>
+      {% endif %}
+    </div>
+    {% if r.what %}
+    <div class="mb-1"><strong class="text-primary small">WHAT:</strong> <span class="small">{{ r.what }}</span></div>
+    {% endif %}
+    {% if r.why %}
+    <div class="mb-1"><strong class="text-success small">WHY:</strong> <span class="small">{{ r.why }}</span></div>
+    {% endif %}
+    {% if r.how %}
+    <div class="mb-1"><strong class="text-info small">HOW:</strong> <span class="small">{{ r.how }}</span></div>
+    {% endif %}
+    {% if r.symbol_names %}
+    <div class="dep-grid mt-1">
+      {% for s in r.symbol_names[:10] %}
+      <a href="{{ url_for('symbol_detail', qn=s) }}" class="badge bg-secondary symbol-link">{{ s }}</a>
+      {% endfor %}
+      {% if r.symbol_names|length > 10 %}<span class="badge bg-light text-dark">+{{ r.symbol_names|length - 10 }} more</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% elif q %}
+<p class="text-muted">No summaries found for "{{ q }}"</p>
+{% elif not error %}
+<p class="text-muted">Enter a query above to search summaries, or browse by scope:</p>
+<div class="d-flex flex-wrap gap-2">
+  <a class="btn btn-sm btn-outline-primary" href="/summaries?scope=cell">Cell summaries</a>
+  <a class="btn btn-sm btn-outline-success" href="/summaries?scope=notebook">Notebook summaries</a>
+  <a class="btn btn-sm btn-outline-info" href="/summaries?scope=directory">Directory summaries</a>
+</div>
+
+<h5 class="mt-4">Try a semantic search</h5>
+<div class="d-flex flex-wrap gap-2">
+  <a class="btn btn-sm btn-outline-secondary" href="/summaries?q=sorting+algorithm&vector=what_vector">sorting algorithm (what)</a>
+  <a class="btn btn-sm btn-outline-secondary" href="/summaries?q=formal+verification&vector=why_vector">formal verification (why)</a>
+  <a class="btn btn-sm btn-outline-secondary" href="/summaries?q=include-book&vector=how_vector">include-book (how)</a>
+</div>
+{% endif %}
+{% endblock %}

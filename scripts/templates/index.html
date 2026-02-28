@@ -23,6 +23,14 @@
       <p class="card-text text-muted mb-0">Symbols</p>
     </div>
   </div>
+  {% if stats.ACL2Summary %}
+  <div class="card stats-card">
+    <div class="card-body text-center">
+      <h5 class="card-title">{{ stats.ACL2Summary | commas }}</h5>
+      <p class="card-text text-muted mb-0"><a href="/summaries" class="text-decoration-none">Summaries</a></p>
+    </div>
+  </div>
+  {% endif %}
 </div>
 
 <h5>Symbol Kinds</h5>

@@ -69,6 +69,14 @@ def index():
         resp = col.aggregate.over_all(total_count=True)
         stats[name] = resp.total_count
 
+    # Summary stats (may not exist yet)
+    try:
+        col = client.collections.get("ACL2Summary")
+        resp = col.aggregate.over_all(total_count=True)
+        stats["ACL2Summary"] = resp.total_count
+    except Exception:
+        stats["ACL2Summary"] = 0
+
     sym = client.collections.get("ACL2Symbol")
     resp = sym.aggregate.over_all(group_by="kind", total_count=True)
     kinds = sorted(
@@ -218,10 +226,17 @@ def symbol_detail():
     except Exception:
         pass  # Reference filters may not be supported in all versions
 
+    # Cell summary for the defining cell
+    cell_summary = None
+    if defining_cell:
+        sums = _get_cell_summaries(client, defining_cell["notebook"])
+        cell_summary = sums.get(defining_cell["cell_index"])
+
     return render_template("symbol.html",
                            symbol=symbol, deps=deps,
                            defining_cell=defining_cell,
-                           reverse_deps=reverse_deps)
+                           reverse_deps=reverse_deps,
+                           cell_summary=cell_summary)
 
 
 @app.route("/notebook/<path:source_file>")
@@ -282,9 +297,15 @@ def notebook_view(source_file):
     cells.sort(key=lambda c: c["index"])
     highlight = request.args.get("cell", type=int)
 
+    # Fetch summaries
+    cell_sums = _get_cell_summaries(client, source_file)
+    nb_summary = _get_notebook_summary(client, source_file)
+
     return render_template("notebook.html",
                            notebook=notebook, source_file=source_file,
-                           cells=cells, highlight=highlight)
+                           cells=cells, highlight=highlight,
+                           cell_summaries=cell_sums,
+                           nb_summary=nb_summary)
 
 
 @app.route("/notebooks")
@@ -307,6 +328,164 @@ def notebook_list():
     )
 
     return render_template("notebooks.html", notebooks=notebooks, q=q)
+
+
+# ── Summary routes ───────────────────────────────────────────────────
+
+@app.route("/summaries")
+def summaries():
+    """Browse summaries: semantic search, or list by scope."""
+    q = request.args.get("q", "").strip()
+    scope = request.args.get("scope", "all")
+    vector = request.args.get("vector", "what_vector")
+    limit = min(int(request.args.get("limit", "50")), 200)
+
+    client = _get_client()
+    try:
+        col = client.collections.get("ACL2Summary")
+    except Exception:
+        return render_template("summaries.html", q=q, scope=scope,
+                               vector=vector, results=[], count=0,
+                               error="ACL2Summary collection not found. Run summarize_kg.py first.")
+
+    results = []
+
+    if q:
+        # Semantic search across summaries
+        resp = col.query.near_text(
+            query=q, limit=limit, target_vector=vector,
+            return_metadata=MetadataQuery(distance=True),
+        )
+        for obj in resp.objects:
+            p = obj.properties
+            if scope != "all" and p.get("scope") != scope:
+                continue
+            dist = getattr(obj.metadata, "distance", None) if obj.metadata else None
+            results.append({
+                "scope": p.get("scope", ""),
+                "ref_key": p.get("ref_key", ""),
+                "what": p.get("what_summary", ""),
+                "why": p.get("why_summary", ""),
+                "how": p.get("how_summary", ""),
+                "source_file": p.get("source_file", ""),
+                "cell_index": p.get("cell_index", -1),
+                "directory": p.get("directory", ""),
+                "symbol_names": p.get("symbol_names", []),
+                "distance": dist,
+            })
+    else:
+        # List by scope
+        if scope == "all":
+            filt = None
+        else:
+            filt = Filter.by_property("scope").equal(scope)
+        resp = col.query.fetch_objects(filters=filt, limit=limit)
+        for obj in resp.objects:
+            p = obj.properties
+            results.append({
+                "scope": p.get("scope", ""),
+                "ref_key": p.get("ref_key", ""),
+                "what": p.get("what_summary", ""),
+                "why": p.get("why_summary", ""),
+                "how": p.get("how_summary", ""),
+                "source_file": p.get("source_file", ""),
+                "cell_index": p.get("cell_index", -1),
+                "directory": p.get("directory", ""),
+                "symbol_names": p.get("symbol_names", []),
+                "distance": None,
+            })
+        results.sort(key=lambda r: (r["scope"], r["ref_key"]))
+
+    return render_template("summaries.html", q=q, scope=scope,
+                           vector=vector, results=results, count=len(results),
+                           error=None)
+
+
+@app.route("/summary/<path:ref_key>")
+def summary_detail(ref_key):
+    """Show a single summary and its context."""
+    client = _get_client()
+    try:
+        col = client.collections.get("ACL2Summary")
+    except Exception:
+        abort(404)
+
+    resp = col.query.fetch_objects(
+        filters=Filter.by_property("ref_key").equal(ref_key),
+        limit=1,
+    )
+    if not resp.objects:
+        abort(404)
+
+    p = resp.objects[0].properties
+    summary = {
+        "scope": p.get("scope", ""),
+        "ref_key": p.get("ref_key", ""),
+        "what": p.get("what_summary", ""),
+        "why": p.get("why_summary", ""),
+        "how": p.get("how_summary", ""),
+        "source_file": p.get("source_file", ""),
+        "cell_index": p.get("cell_index", -1),
+        "directory": p.get("directory", ""),
+        "symbol_names": p.get("symbol_names", []),
+    }
+
+    return render_template("summary_detail.html", summary=summary)
+
+
+def _get_cell_summaries(client, source_file):
+    """Fetch all cell-level summaries for a notebook, as a dict keyed by cell_index."""
+    try:
+        col = client.collections.get("ACL2Summary")
+    except Exception:
+        return {}
+
+    resp = col.query.fetch_objects(
+        filters=(
+            Filter.by_property("scope").equal("cell")
+            & Filter.by_property("source_file").equal(source_file)
+        ),
+        limit=10000,
+    )
+
+    sums = {}
+    for obj in resp.objects:
+        p = obj.properties
+        if p.get("source_file") != source_file:
+            continue
+        idx = p.get("cell_index", -1)
+        if idx >= 0:
+            sums[idx] = {
+                "what": p.get("what_summary", ""),
+                "why": p.get("why_summary", ""),
+                "how": p.get("how_summary", ""),
+            }
+    return sums
+
+
+def _get_notebook_summary(client, source_file):
+    """Fetch the notebook-level summary."""
+    try:
+        col = client.collections.get("ACL2Summary")
+    except Exception:
+        return None
+
+    resp = col.query.fetch_objects(
+        filters=(
+            Filter.by_property("scope").equal("notebook")
+            & Filter.by_property("source_file").equal(source_file)
+        ),
+        limit=1,
+    )
+    for obj in resp.objects:
+        p = obj.properties
+        if p.get("source_file") == source_file:
+            return {
+                "what": p.get("what_summary", ""),
+                "why": p.get("why_summary", ""),
+                "how": p.get("how_summary", ""),
+            }
+    return None
 
 
 # ── Main ─────────────────────────────────────────────────────────────

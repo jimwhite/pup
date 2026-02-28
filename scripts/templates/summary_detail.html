@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Summary: {{ summary.ref_key }} — ACL2 KG{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/">Home</a></li>
+    <li class="breadcrumb-item"><a href="/summaries">Summaries</a></li>
+    <li class="breadcrumb-item active">{{ summary.scope }}: {{ summary.ref_key }}</li>
+  </ol>
+</nav>
+
+<h4>
+  <span class="badge bg-{% if summary.scope == 'cell' %}primary{% elif summary.scope == 'notebook' %}success{% else %}info{% endif %}">{{ summary.scope }}</span>
+  {% if summary.scope == 'cell' %}
+    <a href="{{ url_for('notebook_view', source_file=summary.source_file, cell=summary.cell_index) }}"
+       class="nb-path text-decoration-none">{{ summary.source_file }} · cell {{ summary.cell_index }}</a>
+  {% elif summary.scope == 'notebook' %}
+    <a href="{{ url_for('notebook_view', source_file=summary.source_file) }}"
+       class="nb-path text-decoration-none">{{ summary.source_file }}</a>
+  {% else %}
+    <span class="nb-path">{{ summary.directory }}</span>
+  {% endif %}
+</h4>
+
+<div class="card mt-4">
+  <div class="card-body">
+    {% if summary.what %}
+    <div class="mb-3">
+      <h6 class="text-primary">What</h6>
+      <p>{{ summary.what }}</p>
+    </div>
+    {% endif %}
+    {% if summary.why %}
+    <div class="mb-3">
+      <h6 class="text-success">Why</h6>
+      <p>{{ summary.why }}</p>
+    </div>
+    {% endif %}
+    {% if summary.how %}
+    <div class="mb-3">
+      <h6 class="text-info">How</h6>
+      <p>{{ summary.how }}</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if summary.symbol_names %}
+<h5 class="mt-4">Symbols</h5>
+<div class="dep-grid">
+  {% for s in summary.symbol_names %}
+  <a href="{{ url_for('symbol_detail', qn=s) }}" class="badge bg-secondary symbol-link">{{ s }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="mt-4 small text-muted">
+  Search for similar summaries:
+  {% if summary.what %}
+  <a href="{{ url_for('summaries', q=summary.what[:60], vector='what_vector') }}">what</a> ·
+  {% endif %}
+  {% if summary.why %}
+  <a href="{{ url_for('summaries', q=summary.why[:60], vector='why_vector') }}">why</a> ·
+  {% endif %}
+  {% if summary.how %}
+  <a href="{{ url_for('summaries', q=summary.how[:60], vector='how_vector') }}">how</a>
+  {% endif %}
+</div>
+{% endblock %}

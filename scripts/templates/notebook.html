@@ -12,6 +12,17 @@
 
 <h4 class="nb-path">{{ source_file }}</h4>
 
+{% if nb_summary %}
+<div class="card mb-3 border-success">
+  <div class="card-header bg-success text-white py-1"><strong>Notebook Summary</strong></div>
+  <div class="card-body py-2">
+    {% if nb_summary.what %}<p class="mb-1"><strong class="text-primary">What:</strong> {{ nb_summary.what }}</p>{% endif %}
+    {% if nb_summary.why %}<p class="mb-1"><strong class="text-success">Why:</strong> {{ nb_summary.why }}</p>{% endif %}
+    {% if nb_summary.how %}<p class="mb-0"><strong class="text-info">How:</strong> {{ nb_summary.how }}</p>{% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% if notebook %}
 <div class="mb-3 text-muted small">
   {{ notebook.cell_count }} cells ({{ notebook.code_cell_count }} code)
@@ -55,6 +66,14 @@
     <pre><code>{{ cell.comment_text }}</code></pre>
     {% else %}
     <p class="text-muted mb-0"><em>(empty cell)</em></p>
+    {% endif %}
+    {% if cell_summaries and cell.index in cell_summaries %}
+    {% set cs = cell_summaries[cell.index] %}
+    <div class="summary-box">
+      {% if cs.what %}<span class="what-label">What:</span> {{ cs.what }}<br>{% endif %}
+      {% if cs.why %}<span class="why-label">Why:</span> {{ cs.why }}<br>{% endif %}
+      {% if cs.how %}<span class="how-label">How:</span> {{ cs.how }}{% endif %}
+    </div>
     {% endif %}
   </div>
 </div>
