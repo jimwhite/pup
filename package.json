@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "gyp": "^0.3.0",
+    "tree-sitter-cli": "^0.26.5",
+    "tree-sitter-commonlisp": "^0.4.1"
+  }
+}

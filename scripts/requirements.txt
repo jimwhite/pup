@@ -1,0 +1,2 @@
+weaviate-client>=4.5
+nbformat>=5.10

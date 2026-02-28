@@ -1,0 +1,6 @@
+Scanning 16159 files under books/...
+
+ISO-8859-1 files: 60
+  Total lines with non-ASCII: 706
+UTF-8 files: 34
+  Total lines with non-ASCII: 142
