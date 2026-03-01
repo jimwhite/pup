@@ -1125,7 +1125,8 @@ async def _cached_tool_call(
                     tool_call_id=tc["id"],
                 ))
 
-            log.debug(">>> ToolMessage (last): %s", responses[-1] if responses else "")
+            for i, r in enumerate(responses):
+                log.debug(">>> ToolMessage[%d]: %s", i, r)
 
     if cache is not None:
         cache.put(prompt, json.dumps(all_tool_calls), model)
@@ -1143,11 +1144,15 @@ def _tool_calls_to_summaries(
     for a cell that already has a non-empty ``what`` starts a fresh
     SummaryResult (ordering-based grouping).
 
+    Exact-duplicate tool calls (same cell_number, name, and text) are
+    silently dropped so they do not create duplicate summary objects.
+
     Returns ``(summaries, continuation)`` where *summaries* maps
     each cell index to a list of SummaryResult objects.
     """
     summaries: dict[int, list[SummaryResult]] = {}
     continuation = ""
+    seen: set[tuple] = set()  # (cell_number, name, text)
 
     for tc in tool_calls:
         name = tc.get("name", "")
@@ -1162,6 +1167,13 @@ def _tool_calls_to_summaries(
             continue
 
         text = args.get("summary", "")
+
+        # Skip exact duplicates.
+        if name in ("ReportWhat", "ReportWhy", "ReportHow") and text:
+            key = (cell_num, name, text)
+            if key in seen:
+                continue
+            seen.add(key)
 
         if cell_num not in summaries:
             summaries[cell_num] = [SummaryResult()]
@@ -1343,6 +1355,7 @@ async def summarize_cells(
                 )
                 _min_idx = min(_batch_indices)
                 _max_idx = max(_batch_indices)
+                _seen: set[tuple] = set()  # (cell_number, name, text)
 
                 def fn(
                     all_tcs: list[dict],
@@ -1351,17 +1364,39 @@ async def summarize_cells(
                     # Build per-call responses for this turn.
                     responses: list[str] = []
                     for tc in turn_tcs:
-                        cn = tc.get("args", {}).get("cell_number")
+                        name = tc.get("name", "")
+                        args = tc.get("args", {})
+                        cn = args.get("cell_number")
+                        text = args.get("summary", "")
+
                         if cn is not None and cn not in _batch_indices:
                             responses.append(
                                 f"ERROR: cell_number {cn} is out of "
                                 f"range. Valid cell numbers in this "
-                                f"batch are {_min_idx}–{_max_idx}. "
+                                f"batch are {_min_idx}\u2013{_max_idx}. "
                                 f"Only use cell numbers that appear "
                                 f"in the cells provided."
                             )
+                        elif name in ("ReportWhat", "ReportWhy",
+                                      "ReportHow") and text:
+                            key = (cn, name, text)
+                            if key in _seen:
+                                responses.append(
+                                    f"Duplicate: cell {cn} {name} "
+                                    f"already recorded with the same "
+                                    f"text. Do not repeat summaries."
+                                )
+                            else:
+                                _seen.add(key)
+                                responses.append(
+                                    f"Recorded cell {cn}."
+                                )
                         else:
-                            responses.append("Recorded.")
+                            responses.append(
+                                f"Recorded cell {cn}."
+                                if cn is not None
+                                else "Recorded."
+                            )
 
                     # Compute coverage for the summary on the
                     # last response.
@@ -1388,7 +1423,7 @@ async def summarize_cells(
                     batch_total = len(_batch_indices)
                     progress = (
                         f"{batch_done}/{batch_total} cells "
-                        f"(range {_min_idx}–{_max_idx}) covered. "
+                        f"(range {_min_idx}\u2013{_max_idx}) covered. "
                         f"Breakdown: {d_sym}/{b_sym} symbol, "
                         f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment. "
                         f"Continue with remaining cells."

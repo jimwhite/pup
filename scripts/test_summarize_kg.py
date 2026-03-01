@@ -475,20 +475,12 @@ class TestCachedToolCall:
 class TestProgressFunction:
     """Test the progress function logic that would be used in summarize_cells."""
 
-    def test_progress_computation(self) -> None:
-        """Simulate the progress function closure behavior."""
-        batch_cells = [
-            _cell(0, "code", code_text="(defun f ())",
-                  symbol_names=["ACL2::F"], symbol_kinds=["function"]),
-            _cell(1, "code", code_text="(+ 1 2)"),
-            _cell(2, "markdown", comment_text="; note"),
-            _cell(3, "code", code_text="(defthm t1)",
-                  symbol_names=["ACL2::T1"], symbol_kinds=["theorem"]),
-        ]
+    @staticmethod
+    def _build_progress_fn(batch_cells):
+        """Build a progress fn that mirrors the production closure."""
         batch_indices = {c.cell_index for c in batch_cells}
         _min_idx = min(batch_indices)
         _max_idx = max(batch_indices)
-
         b_sym = sum(1 for c in batch_cells if c.symbol_names)
         b_code = sum(
             1 for c in batch_cells
@@ -497,16 +489,15 @@ class TestProgressFunction:
         b_cmt = sum(
             1 for c in batch_cells if c.cell_type == "markdown"
         )
+        _seen: set = set()
 
-        assert b_sym == 2  # cells 0, 3
-        assert b_code == 1  # cell 1
-        assert b_cmt == 1  # cell 2
-
-        # Build the progress fn matching the production closure.
-        def progress_fn(all_tcs, turn_tcs):
+        def fn(all_tcs, turn_tcs):
             responses = []
             for tc in turn_tcs:
-                cn = tc.get("args", {}).get("cell_number")
+                name = tc.get("name", "")
+                args = tc.get("args", {})
+                cn = args.get("cell_number")
+                text = args.get("summary", "")
                 if cn is not None and cn not in batch_indices:
                     responses.append(
                         f"ERROR: cell_number {cn} is out of range. "
@@ -515,15 +506,28 @@ class TestProgressFunction:
                         f"Only use cell numbers that appear in the "
                         f"cells provided."
                     )
+                elif name in ("ReportWhat", "ReportWhy",
+                              "ReportHow") and text:
+                    key = (cn, name, text)
+                    if key in _seen:
+                        responses.append(
+                            f"Duplicate: cell {cn} {name} "
+                            f"already recorded with the same text. "
+                            f"Do not repeat summaries."
+                        )
+                    else:
+                        _seen.add(key)
+                        responses.append(f"Recorded cell {cn}.")
                 else:
-                    responses.append("Recorded.")
+                    responses.append(
+                        f"Recorded cell {cn}." if cn is not None
+                        else "Recorded."
+                    )
             covered = set()
             for tc in all_tcs:
                 cn = tc.get("args", {}).get("cell_number")
                 if cn is not None and cn in batch_indices:
                     covered.add(cn)
-            batch_done = len(covered)
-            batch_total = len(batch_indices)
             d_sym = sum(1 for c in batch_cells
                         if c.symbol_names and c.cell_index in covered)
             d_code = sum(1 for c in batch_cells
@@ -533,7 +537,7 @@ class TestProgressFunction:
                         if c.cell_type == "markdown"
                         and c.cell_index in covered)
             progress = (
-                f"{batch_done}/{batch_total} cells "
+                f"{len(covered)}/{len(batch_indices)} cells "
                 f"(range {_min_idx}\u2013{_max_idx}) covered. "
                 f"Breakdown: {d_sym}/{b_sym} symbol, "
                 f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment. "
@@ -542,15 +546,27 @@ class TestProgressFunction:
             if responses:
                 responses[-1] += f" {progress}"
             return responses
+        return fn
 
-        # Turn 1: valid cells 0 and 2
+    def test_progress_computation(self) -> None:
+        """Valid calls produce 'Recorded cell N.' with progress."""
+        batch_cells = [
+            _cell(0, "code", code_text="(defun f ())",
+                  symbol_names=["ACL2::F"], symbol_kinds=["function"]),
+            _cell(1, "code", code_text="(+ 1 2)"),
+            _cell(2, "markdown", comment_text="; note"),
+            _cell(3, "code", code_text="(defthm t1)",
+                  symbol_names=["ACL2::T1"], symbol_kinds=["theorem"]),
+        ]
+        fn = self._build_progress_fn(batch_cells)
+
         turn1 = [
             {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W"}},
             {"name": "ReportWhat", "args": {"cell_number": 2, "summary": "C"}},
         ]
-        r1 = progress_fn(turn1, turn1)
+        r1 = fn(turn1, turn1)
         assert len(r1) == 2
-        assert r1[0] == "Recorded."
+        assert r1[0] == "Recorded cell 0."
         assert "2/4 cells" in r1[1]
         assert "range 0\u20133" in r1[1]
         assert "1/2 symbol" in r1[1]
@@ -564,28 +580,57 @@ class TestProgressFunction:
                   symbol_names=["ACL2::G"], symbol_kinds=["function"]),
             _cell(6, "code", code_text="(+ 1 2)"),
         ]
-        batch_indices = {5, 6}
-
-        def progress_fn(all_tcs, turn_tcs):
-            responses = []
-            for tc in turn_tcs:
-                cn = tc.get("args", {}).get("cell_number")
-                if cn is not None and cn not in batch_indices:
-                    responses.append(f"ERROR: cell_number {cn} is out of range.")
-                else:
-                    responses.append("Recorded.")
-            return responses
+        fn = self._build_progress_fn(batch_cells)
 
         turn = [
             {"name": "ReportWhat", "args": {"cell_number": 5, "summary": "ok"}},
             {"name": "ReportWhat", "args": {"cell_number": 99, "summary": "bad"}},
-            {"name": "ReportWhat", "args": {"cell_number": 6, "summary": "ok"}},
+            {"name": "ReportWhat", "args": {"cell_number": 6, "summary": "ok2"}},
         ]
-        r = progress_fn(turn, turn)
-        assert r[0] == "Recorded."
+        r = fn(turn, turn)
+        assert "Recorded cell 5." == r[0]
         assert "ERROR" in r[1]
         assert "99" in r[1]
-        assert r[2] == "Recorded."
+        assert r[2].startswith("Recorded cell 6.")
+
+    def test_duplicate_detected(self) -> None:
+        """Exact-duplicate summaries get a 'Duplicate' response."""
+        batch_cells = [
+            _cell(0, "code", code_text="(defun f ())"),
+            _cell(1, "code", code_text="(defun g ())"),
+        ]
+        fn = self._build_progress_fn(batch_cells)
+
+        # Turn 1: original call
+        turn1 = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "X"}},
+        ]
+        r1 = fn(turn1, turn1)
+        assert "Recorded cell 0." in r1[0]
+
+        # Turn 2: exact same call again
+        all_tcs = turn1 + turn1
+        r2 = fn(all_tcs, turn1)
+        assert "Duplicate" in r2[0]
+        assert "cell 0" in r2[0]
+
+    def test_different_text_not_duplicate(self) -> None:
+        """Same cell + tool but different text is NOT a duplicate."""
+        batch_cells = [
+            _cell(0, "code", code_text="(defun f ())"),
+        ]
+        fn = self._build_progress_fn(batch_cells)
+
+        turn1 = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "idea A"}},
+        ]
+        fn(turn1, turn1)
+
+        turn2 = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "idea B"}},
+        ]
+        r2 = fn(turn1 + turn2, turn2)
+        assert "Recorded cell 0." in r2[0]
 
 
 # ── Hallucinated cell index filtering ─────────────────────────────────
@@ -634,3 +679,53 @@ class TestHallucinatedCellFiltering:
         for bi in bad:
             del summaries[bi]
         assert summaries == {}
+
+
+# ── Duplicate filtering in _tool_calls_to_summaries ───────────────────
+
+
+class TestDuplicateFiltering:
+    """Verify that _tool_calls_to_summaries drops exact-duplicate calls."""
+
+    def test_exact_duplicate_dropped(self):
+        """Identical (cell, name, text) is kept only once."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "X"}},
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "X"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert len(summaries[0]) == 1
+        assert summaries[0][0].what == "X"
+
+    def test_different_text_kept(self):
+        """Same cell + tool but different text → two SummaryResults."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "A"}},
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "B"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert len(summaries[0]) == 2
+        assert summaries[0][0].what == "A"
+        assert summaries[0][1].what == "B"
+
+    def test_duplicate_why_dropped(self):
+        """Duplicate ReportWhy is dropped."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 1, "summary": "W"}},
+            {"name": "ReportWhy", "args": {"cell_number": 1, "summary": "Y"}},
+            {"name": "ReportWhy", "args": {"cell_number": 1, "summary": "Y"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert len(summaries[1]) == 1
+        assert summaries[1][0].what == "W"
+        assert summaries[1][0].why == "Y"
+
+    def test_triple_duplicate_produces_one(self):
+        """Three identical calls → one SummaryResult."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 2, "summary": "Z"}},
+            {"name": "ReportWhat", "args": {"cell_number": 2, "summary": "Z"}},
+            {"name": "ReportWhat", "args": {"cell_number": 2, "summary": "Z"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert len(summaries[2]) == 1
