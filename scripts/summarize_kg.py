@@ -850,15 +850,21 @@ def _fetch_all_notebook_sources(
     client: weaviate.WeaviateClient,
     source_dir: str | None = None,
     no_recurse: bool = False,
+    notebook_list: list[str] | None = None,
 ) -> list[str]:
-    """Return all notebook source_file values, optionally filtered by prefix.
+    """Return all notebook source_file values, optionally filtered.
 
+    If *notebook_list* is provided, only return notebooks whose source_file
+    is in that explicit set (takes precedence over *source_dir*).
     If *no_recurse* is True and *source_dir* is set, only return notebooks
     whose parent directory exactly matches *source_dir* (no subdirectories).
     """
     source_dir = _normalize_source_dir(source_dir)
-    log.debug("_fetch_all_notebook_sources: normalized source_dir=%r, no_recurse=%s",
-             source_dir, no_recurse)
+    log.debug("_fetch_all_notebook_sources: normalized source_dir=%r, no_recurse=%s, notebook_list=%d entries",
+             source_dir, no_recurse, len(notebook_list) if notebook_list else 0)
+
+    # Build an allowlist set when an explicit notebook list is provided
+    allowset: set[str] | None = set(notebook_list) if notebook_list else None
 
     nb_coll = client.collections.get(COLLECTION_NOTEBOOK)
     sources: list[str] = []
@@ -867,6 +873,12 @@ def _fetch_all_notebook_sources(
         return_properties=["source_file"],
     ):
         src = obj.properties.get("source_file", "")
+        # Explicit allowlist takes precedence
+        if allowset is not None:
+            if src not in allowset:
+                continue
+            sources.append(src)
+            continue
         if source_dir == _ROOT_SENTINEL:
             # Root-level files only: no "/" in path means top-level.
             if no_recurse:
@@ -1937,6 +1949,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only process notebooks directly in --source-dir (no subdirectories)",
     )
     p.add_argument(
+        "--notebook-list", default=None, metavar="FILE",
+        help="File with one notebook source_file per line (overrides --source-dir)",
+    )
+    p.add_argument(
         "--weaviate-host", default=DEFAULT_WEAVIATE_HOST,
         help=f"Weaviate host (default: {DEFAULT_WEAVIATE_HOST})",
     )
@@ -2085,6 +2101,16 @@ async def async_main(args: argparse.Namespace) -> int:
             return 0
 
         # ── Discover notebooks ───────────────────────────────────────
+        notebook_list: list[str] | None = None
+        if args.notebook_list:
+            with open(args.notebook_list) as f:
+                notebook_list = [
+                    line.strip() for line in f
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+            log.info("Loaded %d notebooks from %s", len(notebook_list),
+                     args.notebook_list)
+
         effective_dir = _normalize_source_dir(args.source_dir)
         display_dir = "(root)" if effective_dir == _ROOT_SENTINEL else (effective_dir or "(all)")
         if args.source_dir and effective_dir != args.source_dir:
@@ -2092,9 +2118,11 @@ async def async_main(args: argparse.Namespace) -> int:
                      args.source_dir, display_dir)
         notebook_sources = _fetch_all_notebook_sources(
             client, args.source_dir, no_recurse=args.no_recurse,
+            notebook_list=notebook_list,
         )
         log.info("Found %d notebooks%s%s", len(notebook_sources),
-                 f" under {display_dir}" if args.source_dir else "",
+                 f" from {args.notebook_list}" if args.notebook_list
+                 else (f" under {display_dir}" if args.source_dir else ""),
                  " (no recurse)" if args.no_recurse else "")
 
         if not notebook_sources:
