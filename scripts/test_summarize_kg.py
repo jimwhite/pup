@@ -364,7 +364,9 @@ class TestCachedToolCall:
         mock_llm = AsyncMock()
         mock_llm.ainvoke.side_effect = [resp1, resp2, resp3]
 
-        progress_fn = lambda tcs: f"{len(tcs)} calls so far"
+        progress_fn = lambda all_tcs, turn_tcs: [
+            f"{len(all_tcs)} calls so far" for _ in turn_tcs
+        ]
 
         tool_calls, was_cached = await _cached_tool_call(
             "test prompt", mock_llm, "test-model", None, sem,
@@ -392,7 +394,9 @@ class TestCachedToolCall:
         mock_llm = AsyncMock()
         mock_llm.ainvoke.side_effect = [make_resp() for _ in range(20)]
 
-        progress_fn = lambda tcs: "progress"
+        progress_fn = lambda all_tcs, turn_tcs: [
+            "progress" for _ in turn_tcs
+        ]
 
         tool_calls, _ = await _cached_tool_call(
             "test prompt", mock_llm, "test-model", None, sem,
@@ -482,8 +486,9 @@ class TestProgressFunction:
                   symbol_names=["ACL2::T1"], symbol_kinds=["theorem"]),
         ]
         batch_indices = {c.cell_index for c in batch_cells}
+        _min_idx = min(batch_indices)
+        _max_idx = max(batch_indices)
 
-        # Replicate the _make_progress_fn logic
         b_sym = sum(1 for c in batch_cells if c.symbol_names)
         b_code = sum(
             1 for c in batch_cells
@@ -497,47 +502,135 @@ class TestProgressFunction:
         assert b_code == 1  # cell 1
         assert b_cmt == 1  # cell 2
 
-        # Simulate after covering cells 0 and 2
-        tool_calls = [
+        # Build the progress fn matching the production closure.
+        def progress_fn(all_tcs, turn_tcs):
+            responses = []
+            for tc in turn_tcs:
+                cn = tc.get("args", {}).get("cell_number")
+                if cn is not None and cn not in batch_indices:
+                    responses.append(
+                        f"ERROR: cell_number {cn} is out of range. "
+                        f"Valid cell numbers in this batch are "
+                        f"{_min_idx}\u2013{_max_idx}. "
+                        f"Only use cell numbers that appear in the "
+                        f"cells provided."
+                    )
+                else:
+                    responses.append("Recorded.")
+            covered = set()
+            for tc in all_tcs:
+                cn = tc.get("args", {}).get("cell_number")
+                if cn is not None and cn in batch_indices:
+                    covered.add(cn)
+            batch_done = len(covered)
+            batch_total = len(batch_indices)
+            d_sym = sum(1 for c in batch_cells
+                        if c.symbol_names and c.cell_index in covered)
+            d_code = sum(1 for c in batch_cells
+                         if c.cell_type == "code" and not c.symbol_names
+                         and c.cell_index in covered)
+            d_cmt = sum(1 for c in batch_cells
+                        if c.cell_type == "markdown"
+                        and c.cell_index in covered)
+            progress = (
+                f"{batch_done}/{batch_total} cells "
+                f"(range {_min_idx}\u2013{_max_idx}) covered. "
+                f"Breakdown: {d_sym}/{b_sym} symbol, "
+                f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment. "
+                f"Continue with remaining cells."
+            )
+            if responses:
+                responses[-1] += f" {progress}"
+            return responses
+
+        # Turn 1: valid cells 0 and 2
+        turn1 = [
             {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W"}},
             {"name": "ReportWhat", "args": {"cell_number": 2, "summary": "C"}},
         ]
+        r1 = progress_fn(turn1, turn1)
+        assert len(r1) == 2
+        assert r1[0] == "Recorded."
+        assert "2/4 cells" in r1[1]
+        assert "range 0\u20133" in r1[1]
+        assert "1/2 symbol" in r1[1]
+        assert "0/1 code" in r1[1]
+        assert "1/1 comment" in r1[1]
 
-        covered = set()
-        for tc in tool_calls:
-            cn = tc.get("args", {}).get("cell_number")
-            if cn is not None and cn in batch_indices:
-                covered.add(cn)
+    def test_out_of_range_reported(self) -> None:
+        """Out-of-range cell numbers produce ERROR responses."""
+        batch_cells = [
+            _cell(5, "code", code_text="(defun g ())",
+                  symbol_names=["ACL2::G"], symbol_kinds=["function"]),
+            _cell(6, "code", code_text="(+ 1 2)"),
+        ]
+        batch_indices = {5, 6}
 
-        assert covered == {0, 2}
+        def progress_fn(all_tcs, turn_tcs):
+            responses = []
+            for tc in turn_tcs:
+                cn = tc.get("args", {}).get("cell_number")
+                if cn is not None and cn not in batch_indices:
+                    responses.append(f"ERROR: cell_number {cn} is out of range.")
+                else:
+                    responses.append("Recorded.")
+            return responses
 
-        d_sym = sum(
-            1 for c in batch_cells
-            if c.symbol_names and c.cell_index in covered
-        )
-        d_code = sum(
-            1 for c in batch_cells
-            if c.cell_type == "code" and not c.symbol_names
-            and c.cell_index in covered
-        )
-        d_cmt = sum(
-            1 for c in batch_cells
-            if c.cell_type == "markdown"
-            and c.cell_index in covered
-        )
+        turn = [
+            {"name": "ReportWhat", "args": {"cell_number": 5, "summary": "ok"}},
+            {"name": "ReportWhat", "args": {"cell_number": 99, "summary": "bad"}},
+            {"name": "ReportWhat", "args": {"cell_number": 6, "summary": "ok"}},
+        ]
+        r = progress_fn(turn, turn)
+        assert r[0] == "Recorded."
+        assert "ERROR" in r[1]
+        assert "99" in r[1]
+        assert r[2] == "Recorded."
 
-        assert d_sym == 1   # cell 0 covered
-        assert d_code == 0   # cell 1 not covered
-        assert d_cmt == 1    # cell 2 covered
 
-        progress = (
-            f"Recorded. "
-            f"{len(covered)}/{len(batch_indices)} cells in this batch covered. "
-            f"Breakdown: {d_sym}/{b_sym} symbol, "
-            f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment cells. "
-            f"Continue with remaining cells."
-        )
-        assert "2/4 cells in this batch covered" in progress
-        assert "1/2 symbol" in progress
-        assert "0/1 code" in progress
-        assert "1/1 comment" in progress
+# ── Hallucinated cell index filtering ─────────────────────────────────
+
+
+class TestHallucinatedCellFiltering:
+    """Verify that _tool_calls_to_summaries output is correctly
+    filtered when the LLM invents cell indices outside the batch."""
+
+    def test_valid_indices_kept(self):
+        """Summaries for valid cell indices survive filtering."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "a"}},
+            {"name": "ReportWhat", "args": {"cell_number": 3, "summary": "b"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        batch_indices = {0, 1, 2, 3}
+        bad = set(summaries.keys()) - batch_indices
+        assert bad == set()
+        assert set(summaries.keys()) == {0, 3}
+
+    def test_invalid_indices_detected(self):
+        """Cell indices not in the batch are caught."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "ok"}},
+            {"name": "ReportWhat", "args": {"cell_number": 20, "summary": "bad"}},
+            {"name": "ReportWhat", "args": {"cell_number": 75, "summary": "bad2"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        batch_indices = {0, 1, 2, 3, 4}
+        bad = set(summaries.keys()) - batch_indices
+        assert bad == {20, 75}
+        # After filtering:
+        for bi in bad:
+            del summaries[bi]
+        assert set(summaries.keys()) == {0}
+
+    def test_all_invalid_produces_empty(self):
+        """When ALL cell indices are hallucinated, result is empty."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 99, "summary": "x"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        batch_indices = {0, 1, 2}
+        bad = set(summaries.keys()) - batch_indices
+        for bi in bad:
+            del summaries[bi]
+        assert summaries == {}

@@ -1039,16 +1039,21 @@ async def _cached_tool_call(
     model: str,
     cache: LLMCache | None,
     sem: asyncio.Semaphore,
-    tool_response_fn: Callable[[list[dict]], str] | None = None,
+    tool_response_fn: (
+        Callable[[list[dict], list[dict]], list[str]] | None
+    ) = None,
     max_turns: int = 10,
 ) -> tuple[list[dict], bool]:
     """Invoke the LLM with tool calling and SQLite caching.
 
     When *tool_response_fn* is provided, runs a multi-turn loop:
     send the prompt, collect tool calls, respond with ``ToolMessage``s
-    (the last one in each round includes text from *tool_response_fn*),
-    and continue until the model sends no more tool calls or
-    *max_turns* is reached.
+    containing per-call feedback from *tool_response_fn*, and continue
+    until the model sends no more tool calls or *max_turns* is reached.
+
+    *tool_response_fn(all_tool_calls, turn_tool_calls)* receives the
+    cumulative list of all tool calls and the current turn's calls,
+    and must return a list of strings — one response per turn call.
 
     When *tool_response_fn* is ``None``, behaves as single-shot
     (one ``ainvoke``, collect tool calls, done).
@@ -1110,16 +1115,17 @@ async def _cached_tool_call(
             # model can continue.
             messages.append(response)  # The AIMessage with tool_calls.
 
-            progress_text = tool_response_fn(all_tool_calls)
+            responses = tool_response_fn(all_tool_calls, turn_calls)
             for i, tc in enumerate(response.tool_calls):
-                is_last = (i == len(response.tool_calls) - 1)
-                content = progress_text if is_last else "Recorded."
+                content = (
+                    responses[i] if i < len(responses) else "Recorded."
+                )
                 messages.append(ToolMessage(
                     content=content,
                     tool_call_id=tc["id"],
                 ))
 
-            log.debug(">>> ToolMessage: %s", progress_text)
+            log.debug(">>> ToolMessage (last): %s", responses[-1] if responses else "")
 
     if cache is not None:
         cache.put(prompt, json.dumps(all_tool_calls), model)
@@ -1335,8 +1341,30 @@ async def summarize_cells(
                 b_cmt = sum(
                     1 for c in _batch_cells if c.cell_type == "markdown"
                 )
+                _min_idx = min(_batch_indices)
+                _max_idx = max(_batch_indices)
 
-                def fn(all_tcs: list[dict]) -> str:
+                def fn(
+                    all_tcs: list[dict],
+                    turn_tcs: list[dict],
+                ) -> list[str]:
+                    # Build per-call responses for this turn.
+                    responses: list[str] = []
+                    for tc in turn_tcs:
+                        cn = tc.get("args", {}).get("cell_number")
+                        if cn is not None and cn not in _batch_indices:
+                            responses.append(
+                                f"ERROR: cell_number {cn} is out of "
+                                f"range. Valid cell numbers in this "
+                                f"batch are {_min_idx}–{_max_idx}. "
+                                f"Only use cell numbers that appear "
+                                f"in the cells provided."
+                            )
+                        else:
+                            responses.append("Recorded.")
+
+                    # Compute coverage for the summary on the
+                    # last response.
                     covered = set()
                     for tc in all_tcs:
                         cn = tc.get("args", {}).get("cell_number")
@@ -1358,13 +1386,17 @@ async def summarize_cells(
                     )
                     batch_done = len(covered)
                     batch_total = len(_batch_indices)
-                    return (
-                        f"Recorded. "
-                        f"{batch_done}/{batch_total} cells in this batch covered. "
+                    progress = (
+                        f"{batch_done}/{batch_total} cells "
+                        f"(range {_min_idx}–{_max_idx}) covered. "
                         f"Breakdown: {d_sym}/{b_sym} symbol, "
-                        f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment cells. "
+                        f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment. "
                         f"Continue with remaining cells."
                     )
+                    # Append progress to the last response.
+                    if responses:
+                        responses[-1] += f" {progress}"
+                    return responses
                 return fn
 
             tool_calls, was_cached = await _cached_tool_call(
@@ -1379,6 +1411,18 @@ async def summarize_cells(
             summaries, continuation_context = _tool_calls_to_summaries(
                 tool_calls,
             )
+
+            # Filter out hallucinated cell indices the LLM may have
+            # invented (i.e. indices not present in this batch).
+            bad_indices = set(summaries.keys()) - batch_indices
+            if bad_indices:
+                log.warning(
+                    "  %s: LLM returned %d invalid cell indices "
+                    "(not in batch): %s — skipping",
+                    nb_src, len(bad_indices), sorted(bad_indices),
+                )
+                for bi in bad_indices:
+                    del summaries[bi]
 
             # Track which cells received summaries for progress.
             summarized_cell_indices.update(summaries.keys())
@@ -1396,6 +1440,15 @@ async def summarize_cells(
                         (c for c in batch_cells if c.cell_index == cell_idx),
                         None,
                     )
+                    if cell_rec is None:
+                        # Shouldn't happen after the filter above,
+                        # but guard against it anyway.
+                        log.warning(
+                            "  %s: skipping cell_idx %d (no matching "
+                            "ACL2Cell record)",
+                            nb_src, cell_idx,
+                        )
+                        continue
                     nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))
                     cell_uuid = str(
                         generate_uuid5(f"cell:{nb_src}:{cell_idx}")
