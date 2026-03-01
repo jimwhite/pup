@@ -79,6 +79,392 @@ DEFAULT_CONTEXT_SIZE = 8192
 log = logging.getLogger("summarize-kg")
 
 
+# ─── Topic context for targeted prompts ──────────────────────────────
+#
+# Maps directory prefixes to (topic_label, description, focus_guidance).
+# The description tells the LLM what this area of the ACL2 library is about.
+# The focus_guidance tells it what to emphasise in summaries — what details
+# will be most useful for someone learning to use this library or writing
+# teaching material about it.
+#
+# Lookup is longest-prefix-match, so "books/centaur/fty" beats "books/centaur".
+
+TOPIC_CONTEXTS: list[tuple[str, str, str, str]] = [
+    # ── FTY type system ──────────────────────────────────────────────
+    ("books/centaur/fty",
+     "FTY Fixtype Framework",
+     "The FTY (fixtype) library is ACL2's primary type-definition framework. "
+     "It provides macros like defprod (product types), deftagsum (tagged sum/union types), "
+     "deflist (typed lists), defalist (typed alists), defoption (option/maybe types), "
+     "deftypes (mutual recursion), and defflexsum. Each type gets automatic fixing functions, "
+     "equivalence relations, accessor/constructor macros, and supporting theorems.",
+     "Focus on: what type is being defined, the fix/equiv pattern it establishes, "
+     "what fields/variants it has, what fixing function and equivalence relation are generated, "
+     "and how other code should use these types. Note any defvisitor or bitstruct patterns."),
+
+    # ── std/basic ────────────────────────────────────────────────────
+    ("books/std/basic",
+     "Standard Basic Types & Arithmetic Equivalences",
+     "Fundamental type-fixing functions and arithmetic equivalences used pervasively "
+     "in ACL2: nfix, ifix, pos-fix, realfix, rfix (rationals), bit types (bytep, nibblep), "
+     "maybe-natp, mbt$, and arith-equivs (int-equiv, nat-equiv, bit-equiv). These establish "
+     "the fix/equiv discipline that all modern ACL2 code follows.",
+     "Focus on: what equivalence or fixing function is defined, what congruence rules it "
+     "enables, and how it fits into the broader fix/equiv discipline. "
+     "Highlight any :congruence or :fixing-function-related theorems."),
+
+    # ── std/util — definition macros ─────────────────────────────────
+    ("books/std/util",
+     "Standard Utility Macros (define, b*, defenum, etc.)",
+     "The std/util library provides the most-used definition macros in modern ACL2: "
+     "define (enhanced defun with guards, returns specs, and xdoc), "
+     "b* (structured binding with pattern matching), defrule (enhanced defthm), "
+     "defines (mutual recursion), deflist, defalist, defprojection, defaggregate, "
+     "defenum, defval, defconsts, defarbrec, and defmapping. "
+     "These macros are essential for writing idiomatic ACL2 code.",
+     "Focus on: what macro is being defined or demonstrated, its syntax and options, "
+     "what code it generates (recognizers, fixers, theorems), and usage patterns. "
+     "For tests files, emphasise the usage examples as teaching material."),
+
+    # ── std/lists ────────────────────────────────────────────────────
+    ("books/std/lists",
+     "Standard List Operations Library",
+     "Theorems about built-in and extended list operations: append, nth, nthcdr, take, "
+     "rev, member, remove, subsetp, no-duplicatesp, list-fix, prefixp, suffixp, "
+     "flatten, set-difference, intersection, union, etc. Establishes list-equiv "
+     "congruences and provides rewrite rules for compositional reasoning about lists.",
+     "Focus on: what list operations are covered, key rewrite rules and their "
+     "directions, any congruence rules, and practical lemma patterns for "
+     "reasoning about list-manipulating functions."),
+
+    # ── std/alists ───────────────────────────────────────────────────
+    ("books/std/alists",
+     "Standard Alist (Association List) Library",
+     "Theorems about association list operations: assoc, put-assoc, remove-assoc, "
+     "strip-cars, strip-cdrs, alist-keys, alist-vals, hons-assoc-equal (fast alists), "
+     "alist-fix, alist-equiv, and alist map operations. Essential for reasoning about "
+     "key-value data structures in ACL2.",
+     "Focus on: what alist operation is formalised, the difference between regular "
+     "alists and fast alists (hons-based), key lemma patterns, and compatibility theorems."),
+
+    # ── std/osets ────────────────────────────────────────────────────
+    ("books/std/osets",
+     "Ordered Sets (Osets) Library",
+     "Finite ordered sets with a canonical representation (elements sorted by <<). "
+     "Provides in, insert, delete, union, intersect, difference, cardinality, "
+     "subset, mergesort, quantification (defquant), and set-equiv. Uses pick-a-point "
+     "proof strategy for membership reasoning.",
+     "Focus on: what set operation or theorem is defined, the pick-a-point strategy, "
+     "computed hints for set reasoning, quantification patterns, and how osets "
+     "differ from list-based set operations."),
+
+    # ── std/strings ──────────────────────────────────────────────────
+    ("books/std/strings",
+     "Standard String Processing Library",
+     "String operations: concatenation (cat, str::cat), case conversion, "
+     "character classification (char-kinds), numeric parsing (decimal, hex, octal, binary), "
+     "base64, string searching, and abbreviations. Provides both executable functions "
+     "and reasoning support.",
+     "Focus on: what string operation is provided, its executable behaviour, "
+     "and key theorems for reasoning about strings and character lists."),
+
+    # ── std/io ───────────────────────────────────────────────────────
+    ("books/std/io",
+     "Standard I/O Library",
+     "File I/O operations: read-file-characters, read-file-lines, read-file-bytes, "
+     "read-file-objects, print-objects, serialization, read-string, and channel management. "
+     "Bridges ACL2's logical world with actual file system operations.",
+     "Focus on: what I/O operation is defined, its guard obligations, state threading, "
+     "and how it relates to ACL2's logical file model."),
+
+    # ── std/stobjs ───────────────────────────────────────────────────
+    ("books/std/stobjs",
+     "Standard Stobj (Single-Threaded Objects) Library",
+     "Utilities for defining and reasoning about stobjs: typed arrays (1d-arr, 2d-arr), "
+     "hash tables (def-hash), stobj cloning, nested stobjs, abstract stobjs (nicestobj), "
+     "and updater-independence reasoning. Stobjs provide mutable state with logical soundness.",
+     "Focus on: what stobj pattern or utility is defined, how it maintains the "
+     "single-threaded discipline, the abstract-vs-concrete stobj correspondence, "
+     "and updater independence proofs."),
+
+    # ── std/typed-lists ──────────────────────────────────────────────
+    ("books/std/typed-lists",
+     "Typed List Recognizers",
+     "Recognisers and theorems for homogeneous lists: nat-listp, integer-listp, "
+     "string-listp, symbol-listp, boolean-listp, character-listp, "
+     "signed-byte-listp, unsigned-byte-listp, etc.",
+     "Focus on: what typed-list recognizer is defined, its relationship to the "
+     "element predicate, and forwarding/rewriting theorems."),
+
+    # ── std/bitsets ──────────────────────────────────────────────────
+    ("books/std/bitsets",
+     "Bitset Operations Library",
+     "Efficient set representations using bitmasks and bignum extraction. "
+     "Provides bitset-insert, bitset-member, bitset-union, bitset-intersect, "
+     "bitset-difference, and sparse bitset variants (sbitsets).",
+     "Focus on: the bitset representation, operation semantics, "
+     "correspondence with logical set operations, and performance considerations."),
+
+    # ── ordinals ─────────────────────────────────────────────────────
+    ("books/ordinals",
+     "Ordinal Arithmetic for Termination Proofs",
+     "Ordinal arithmetic (addition, multiplication, exponentiation) and well-foundedness "
+     "proofs for ACL2's termination checker. Every recursive function in ACL2 must have "
+     "a measure that decreases in the ordinal ordering <o. Also covers lexicographic "
+     "orderings for multi-argument measures.",
+     "Focus on: what ordinal operation or theorem is proved, how it relates to "
+     "termination proofs, measure functions, and lexicographic ordering patterns."),
+
+    # ── textbook ─────────────────────────────────────────────────────
+    ("books/textbook",
+     "ACL2 Textbook Exercises & Solutions",
+     "Worked exercises from 'Computer-Aided Reasoning: An Approach' by Kaufmann, "
+     "Manolios, and Moore. Covers chapters 3-11: function definitions, recursion, "
+     "induction, logic-mode vs program-mode, sorting algorithms (insertion sort, "
+     "mergesort, quicksort), tautology checking, compression, finite sets, "
+     "and encapsulation.",
+     "Focus on: the exercise being solved, the proof strategy used (induction scheme, "
+     "lemma decomposition, hint usage), common pitfalls, and how the solution "
+     "demonstrates ACL2 proof methodology."),
+
+    # ── proofstyles ──────────────────────────────────────────────────
+    ("books/proofstyles",
+     "Proof Style Comparisons (Clock vs Invariant)",
+     "Systematic comparison of proof methodologies for program verification: "
+     "clock functions vs invariant-based proofs, partial vs total correctness, "
+     "soundness vs completeness. Demonstrates how to convert between proof styles "
+     "and when each is appropriate.",
+     "Focus on: which proof style is being used or compared, the key structural "
+     "differences between clock and invariant approaches, the conversion technique, "
+     "and guidance on when to prefer which style."),
+
+    # ── demos/marktoberdorf ──────────────────────────────────────────
+    ("books/demos/marktoberdorf-08",
+     "Marktoberdorf 2008 ACL2 Lectures (J S Moore)",
+     "J Strother Moore's Marktoberdorf Summer School 2008 tutorial on ACL2. "
+     "Five lectures covering: ACL2 fundamentals, the M1 machine model (JVM-like), "
+     "operational semantics, fast execution verification, and compiler correctness proof.",
+     "Focus on: the pedagogical progression — what concept each lecture/file teaches, "
+     "the M1 machine model, how to define and verify bytecode programs, "
+     "and the clock-function proof methodology."),
+
+    # ── demos (general) ──────────────────────────────────────────────
+    ("books/demos",
+     "ACL2 Demonstrations & Examples",
+     "Practical demonstrations of ACL2 features and techniques: "
+     "BRR (break-rewrite-rule) debugging, abstract stobjs (defabsstobj), "
+     "congruent stobjs, loop verification (loop-primer), floating point reasoning, "
+     "generalized equivalences (geneqv), GL bit-blasting, and more.",
+     "Focus on: what ACL2 feature or technique is demonstrated, the complete "
+     "usage pattern shown, key takeaways for practitioners, and any debugging "
+     "or investigation methodology (especially for BRR demos)."),
+
+    # ── hints ────────────────────────────────────────────────────────
+    ("books/hints",
+     "ACL2 Hint Mechanism",
+     "The hint system guides ACL2's prover: :use (apply a lemma), :in-theory "
+     "(enable/disable rules), :expand (force expansion), :cases (case splitting), "
+     ":induct (select induction scheme), computed hints (programmatic hints), "
+     "consider hints, subgoal identification, and hint merging.",
+     "Focus on: what hint type or pattern is demonstrated, when to use it, "
+     "common pitfalls, and the interaction between different hint types. "
+     "For basic-tests.lisp, catalogue all hint types shown."),
+    ("books/kestrel/hints",
+     "Kestrel Hint Utilities",
+     "Hint manipulation utilities: combining hints, removing hints from events, "
+     "renaming hints, case-split helpers, and goal specification.",
+     "Focus on: what hint utility is provided, its API, and practical use cases."),
+
+    # ── clause-processors ────────────────────────────────────────────
+    ("books/clause-processors",
+     "Clause Processors (Proof Extensions)",
+     "Clause processors extend ACL2's prover with custom proof procedures. "
+     "Includes: basic clause processor examples, SAT solving (SULFA), "
+     "BV (bit-vector) reasoning, constant propagation, let abstraction, "
+     "just-expand, generalization, induction, and equality reasoning CPs.",
+     "Focus on: what clause processor is defined, its correctness proof pattern "
+     "(the evaluator requirement), how to attach it via :clause-processor hints, "
+     "and what class of goals it handles."),
+
+    # ── arithmetic-5 ─────────────────────────────────────────────────
+    ("books/arithmetic-5",
+     "Arithmetic-5 Reasoning Library",
+     "Automatic reasoning about arithmetic: integer type reasoning, normalization, "
+     "simplification, exponentiation, linear and non-linear arithmetic. "
+     "Provides rewrite rules and meta-functions for arithmetic expressions.",
+     "Focus on: what arithmetic reasoning capability is provided, "
+     "key rewrite rules and their trigger patterns, the theory structure "
+     "(which rules are enabled by default), and the meta-function approach."),
+
+    # ── data-structures ──────────────────────────────────────────────
+    ("books/data-structures",
+     "Classic Data Structure Libraries",
+     "Older but comprehensive data structure libraries: lists (with 251 theorems), "
+     "alists, arrays, records, memory models (memtree), deflist, defalist, "
+     "structures, sets, and no-duplicates reasoning.",
+     "Focus on: what data structure is formalised, its representation, "
+     "key operations and their properties, and how it compares to the "
+     "newer std/ equivalents."),
+
+    # ── kestrel/apt ──────────────────────────────────────────────────
+    ("books/kestrel/apt",
+     "APT (Automated Program Transformations)",
+     "Verified program transformations: restrict (domain restriction), parteval "
+     "(partial evaluation), casesplit, isodata/expdata (data representation change), "
+     "finite-difference, lift-iso, propagate-iso, schemalg (algorithmic schemas), "
+     "rename-params, rename-calls, and drop-irrelevant-params.",
+     "Focus on: what transformation is defined, its input/output contract, "
+     "the correctness theorem it proves, how to invoke it, and what class of "
+     "programs it applies to. For test files, emphasise the usage examples."),
+
+    # ── codewalker ───────────────────────────────────────────────────
+    ("books/projects/codewalker",
+     "Codewalker — Symbolic Execution & Decompilation",
+     "Symbolic execution framework for the M1 JVM-like machine model. "
+     "Provides codewalker (the core engine), terminatricks (termination analysis), "
+     "M1 machine model v3, and demo verifications of bytecode programs "
+     "(factorial, count-up). Also used for x86 ISA proofs.",
+     "Focus on: the symbolic execution methodology, how codewalker works "
+     "(state abstraction, path exploration), the M1 machine model, "
+     "clock-function proofs, and how to verify a new bytecode program."),
+
+    # ── abnf ─────────────────────────────────────────────────────────
+    ("books/projects/abnf",
+     "ABNF Grammar Parsing & Verification",
+     "Verified ABNF grammar parsing: grammar definition (defgrammar), "
+     "tree operations (deftreeops), parser construction (defdefparse), "
+     "executable parser, and correctness verification. Includes grammars for "
+     "URI, HTTP, IMAP, SMTP, IMF (email), and PDF.",
+     "Focus on: the grammar definition pattern, how parsing is formalised, "
+     "the parser correctness theorem structure, and the defdefparse macro "
+     "for building verified parsers."),
+
+    # ── coi ──────────────────────────────────────────────────────────
+    ("books/coi",
+     "COI (Community of Interest) Libraries",
+     "Foundational libraries: bags (multisets with extensive metatheoretic reasoning), "
+     "alist equivalences (keyquiv, bindequiv, subkeyquiv), adviser (proof advising), "
+     "paths, records, and more. Heavy use of meta-functions and bind-free rules.",
+     "Focus on: what abstraction is formalised, the meta-reasoning approach "
+     "(meta-functions, bind-free), the algebraic properties proved, "
+     "and practical usage patterns."),
+
+    # ── centaur/misc ─────────────────────────────────────────────────
+    ("books/centaur/misc",
+     "Centaur Miscellaneous Utilities",
+     "Utility libraries from the Centaur hardware verification team: "
+     "bound-rewriter, context-sensitive rewriting, DAG/DFS algorithms, "
+     "fast alists, evaluator metatheorems, graph operations, and more.",
+     "Focus on: what utility is provided, its API and intended use case, "
+     "and any novel proof techniques (especially meta-theorems and context rewriting)."),
+
+    # ── milawa ───────────────────────────────────────────────────────
+    ("books/projects/milawa",
+     "Milawa — Verified Theorem Prover",
+     "Milawa is a verified theorem prover for a simple first-order logic, "
+     "built and verified in ACL2. Includes the core logic, proof checker, "
+     "rewrite tactics, and bootstrapping process.",
+     "Focus on: the logical foundation, proof checker structure, how tactics "
+     "are implemented and verified, and the bootstrapping methodology."),
+
+    # ── x86isa ───────────────────────────────────────────────────────
+    ("books/projects/x86isa",
+     "x86 ISA Formal Model",
+     "Formal model of the x86 instruction set architecture. Includes "
+     "instruction semantics, memory model, paging, and proof infrastructure "
+     "for verifying x86 machine code programs.",
+     "Focus on: what x86 feature is modelled, the state representation, "
+     "instruction semantics, and proof methodology for machine code."),
+
+    # ── Broad fallbacks (less specific) ──────────────────────────────
+    ("books/centaur",
+     "Centaur Hardware Verification Libraries",
+     "Libraries developed by the Centaur Technology hardware verification team. "
+     "Includes FTY types, VL (Verilog), SV (SystemVerilog), GL/FGL "
+     "(bit-level symbolic execution), bitops, and misc utilities.",
+     "Focus on: the hardware verification methodology, bit-level reasoning, "
+     "and how the library supports industrial-scale verification."),
+
+    ("books/kestrel",
+     "Kestrel Institute Libraries",
+     "Libraries from Kestrel Institute for program synthesis and transformation. "
+     "Includes APT transformations, event macros, Java/C code generation, "
+     "executable parsers, and general utilities.",
+     "Focus on: the program transformation approach, synthesis methodology, "
+     "and how the tools support verified software development."),
+
+    ("books/projects",
+     "ACL2 Community Projects",
+     "Verification projects contributed by the ACL2 community: formal models of "
+     "ISAs (x86, ARM), verified parsers (ABNF), theorem provers (Milawa), "
+     "symbolic execution (codewalker), and more.",
+     "Focus on: what is being verified, the proof architecture, key lemmas, "
+     "and the practical verification methodology."),
+
+    ("books/std",
+     "ACL2 Standard Libraries",
+     "The standard libraries providing foundational data structures, types, "
+     "and utilities for ACL2 development.",
+     "Focus on: what operation or type is formalised, key rewrite rules, "
+     "and idiomatic usage patterns."),
+
+    ("books/workshops",
+     "ACL2 Workshop Papers & Supporting Code",
+     "Code accompanying papers presented at ACL2 workshops. Contains "
+     "diverse verification examples, novel techniques, and tool demonstrations.",
+     "Focus on: what technique or tool is demonstrated, the verification "
+     "approach, and novel proof strategies."),
+
+    ("books/system",
+     "ACL2 System Extensions & Utilities",
+     "Extensions to the ACL2 system itself: verified termination, "
+     "guard verification for system functions, and meta-level utilities.",
+     "Focus on: what system function is being verified or extended, "
+     "and the guard/termination proof strategy."),
+
+    ("books",
+     "ACL2 Community Books",
+     "The ACL2 community books library — a large collection of verified "
+     "libraries, tools, and projects contributed by ACL2 users.",
+     "Focus on: what the code defines or proves, its purpose in the broader "
+     "library, and practical usage guidance."),
+]
+
+
+def _get_topic_context(source_file: str) -> tuple[str, str, str]:
+    """Return (topic_label, description, focus_guidance) for a source file.
+
+    Uses longest-prefix matching against TOPIC_CONTEXTS.
+    Returns empty strings if no match.
+    """
+    best_prefix = ""
+    best_match: tuple[str, str, str] = ("", "", "")
+
+    for prefix, label, desc, focus in TOPIC_CONTEXTS:
+        if source_file.startswith(prefix) and len(prefix) > len(best_prefix):
+            best_prefix = prefix
+            best_match = (label, desc, focus)
+
+    return best_match
+
+
+def _format_topic_section(source_file: str) -> str:
+    """Format the topic context section for injection into prompts.
+
+    Returns an empty string if no topic context is available.
+    """
+    label, desc, focus = _get_topic_context(source_file)
+    if not label:
+        return ""
+
+    return (
+        f"\n--- Library Context ---\n"
+        f"Topic area: {label}\n"
+        f"{desc}\n"
+        f"{focus}\n"
+    )
+
+
 # ─── Data classes ────────────────────────────────────────────────────
 
 
@@ -271,15 +657,19 @@ BATCH_CELL_PROMPT = """\
 /no_think
 You are an expert in ACL2 (A Computational Logic for Applicative Common Lisp) \
 and formal verification.  Below are cells from the notebook ``{source_file}``.
-
+{topic_section}
 For each substantive cell, call the appropriate tool(s):
-- report_what: describe what the cell does (functionality / behaviour)
-- report_why: explain the purpose or goal
-- report_how: provide usage instructions (only if applicable)
+- report_what: describe what the cell does — be specific about what is defined, \
+proved, or configured (name the functions, theorems, macros, types, or rules)
+- report_why: explain the purpose — why this definition/theorem matters, what \
+problem it solves, or what proof obligation it discharges
+- report_how: provide usage guidance — how to call/invoke/apply what is defined, \
+what arguments it takes, or what theory to include (only if applicable)
 
 Use the cell_number argument to identify which cell you are annotating.
 Skip trivial cells (bare include-book, in-package, or very short boilerplate).
-Keep each summary to a few sentences.  Be precise and use ACL2 terminology correctly.
+Keep each summary to 1-3 precise sentences using correct ACL2 terminology.
+Name specific functions, macros, theorems, and rules rather than speaking generically.
 {continuation_section}
 --- Cells ---
 {cells_text}"""
@@ -288,13 +678,17 @@ NOTEBOOK_CHUNK_PROMPT = """\
 /no_think
 You are summarizing a group of ACL2 notebook cells.  Below are individual \
 cell summaries from the same notebook file ``{source_file}``.
-
+{topic_section}
 Call each tool once to summarize this group:
-- summary_what: What this group of definitions/theorems accomplishes.
-- summary_why: The broader purpose or goal.
-- summary_how: How to use the facilities defined here.
+- summary_what: What this group of definitions/theorems accomplishes. \
+Name the key functions, macros, types, or theorems defined.
+- summary_why: The broader purpose — what capability this enables or \
+what verification goal it supports.
+- summary_how: How to use the facilities defined here — include-book paths, \
+key entry points, typical invocation patterns.
 
-Keep each to 2-4 sentences.  Be precise.
+Keep each to 2-4 sentences.  Be specific: name things rather than \
+speaking generically about "various definitions".
 
 --- Cell Summaries ---
 {cell_summaries}"""
@@ -303,13 +697,16 @@ NOTEBOOK_REDUCE_PROMPT = """\
 /no_think
 You are summarizing an ACL2 notebook file ``{source_file}``.
 Below are intermediate summaries from different sections of this notebook.
-
+{topic_section}
 Call each tool once to produce the combined summary:
-- summary_what: What this file defines or proves, overall.
-- summary_why: The purpose of this file in the library.
-- summary_how: How to use the facilities it provides (include-book path, key functions/macros).
+- summary_what: What this file defines or proves, overall. \
+Name the primary functions, macros, types, or theorem families.
+- summary_why: The purpose of this file in the library — what it enables \
+for downstream users or what verification obligation it fulfils.
+- summary_how: How to use it — the include-book path, key entry-point \
+functions/macros, and any prerequisites or companion books.
 
-Keep each to 2-4 sentences.
+Keep each to 2-4 sentences.  Be concrete and name specific things.
 
 --- Section Summaries ---
 {section_summaries}"""
@@ -318,11 +715,14 @@ DIRECTORY_REDUCE_PROMPT = """\
 /no_think
 You are summarizing the ACL2 library directory ``{directory}``.
 Below are summaries of the notebooks and subdirectories it contains.
-
+{topic_section}
 Call each tool once to produce the combined summary:
-- summary_what: What this directory provides.
-- summary_why: Its purpose in the broader ACL2 library.
-- summary_how: How to use it (key include-book paths, primary entry points).
+- summary_what: What this directory provides — the main capabilities, \
+types, theorems, or tools defined.
+- summary_why: Its purpose in the broader ACL2 library — what problems \
+it solves or what user needs it addresses.
+- summary_how: How to use it — the primary include-book path (usually top.lisp), \
+key entry-point macros/functions, and important sub-libraries.
 
 Keep each to 3-5 sentences.
 
@@ -685,6 +1085,7 @@ async def summarize_cells(
 
             prompt = BATCH_CELL_PROMPT.format(
                 source_file=nb_src,
+                topic_section=_format_topic_section(nb_src),
                 continuation_section=cont_section,
                 cells_text=cells_text,
             )
@@ -837,6 +1238,7 @@ async def summarize_notebooks(
             cell_text = _format_cell_summaries(chunk)
             prompt = NOTEBOOK_CHUNK_PROMPT.format(
                 source_file=nb_src,
+                topic_section=_format_topic_section(nb_src),
                 cell_summaries=cell_text,
             )
             tcs, _ = await _cached_tool_call(
@@ -861,6 +1263,7 @@ async def summarize_notebooks(
                     rc_text = _format_intermediates(rc_sums)
                     prompt = NOTEBOOK_REDUCE_PROMPT.format(
                         source_file=nb_src,
+                        topic_section=_format_topic_section(nb_src),
                         section_summaries=rc_text,
                     )
                     tcs, _ = await _cached_tool_call(
@@ -872,6 +1275,7 @@ async def summarize_notebooks(
 
             prompt = NOTEBOOK_REDUCE_PROMPT.format(
                 source_file=nb_src,
+                topic_section=_format_topic_section(nb_src),
                 section_summaries=section_text,
             )
             tcs, _ = await _cached_tool_call(
@@ -1133,9 +1537,12 @@ async def summarize_directories(
         content_chunks = _chunk_text_parts_by_size(
             contents_parts, context_size, prompt_overhead=400)
 
+        dir_topic = _format_topic_section(directory + "/")
+
         if len(content_chunks) == 1:
             prompt = DIRECTORY_REDUCE_PROMPT.format(
                 directory=directory,
+                topic_section=dir_topic,
                 contents="\n\n".join(content_chunks[0]),
             )
             tcs, _ = await _cached_tool_call(
@@ -1148,6 +1555,7 @@ async def summarize_directories(
             for cc in content_chunks:
                 prompt = DIRECTORY_REDUCE_PROMPT.format(
                     directory=directory,
+                    topic_section=dir_topic,
                     contents="\n\n".join(cc),
                 )
                 tcs, _ = await _cached_tool_call(
@@ -1158,6 +1566,7 @@ async def summarize_directories(
             section_text = _format_intermediates(chunk_results)
             prompt = DIRECTORY_REDUCE_PROMPT.format(
                 directory=directory,
+                topic_section=dir_topic,
                 contents=section_text,
             )
             tcs, _ = await _cached_tool_call(
