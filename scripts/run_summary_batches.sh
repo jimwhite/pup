@@ -11,6 +11,8 @@
 #   ./scripts/run_summary_batches.sh 1        # Run only batch 1
 #   ./scripts/run_summary_batches.sh 2 3      # Run batches 2 and 3
 #   ./scripts/run_summary_batches.sh --dry-run 1  # Dry-run batch 1
+#   ./scripts/run_summary_batches.sh -v 1        # Verbose (LLM message log)
+#   ./scripts/run_summary_batches.sh --overwrite 1 # Re-run batch 1 from scratch
 #
 # Logs are written to logs/batch-N-YYYYMMDD-HHMMSS.log
 #
@@ -24,14 +26,16 @@ LOGDIR="logs"
 JOBS="${JOBS:-4}"
 
 # ── Parse flags vs batch numbers ────────────────────────────────────
-DRY_RUN=""
+EXTRA_FLAGS=""
 BATCHES=()
 
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN="--dry-run" ;;
-        [1-5])     BATCHES+=("$arg") ;;
-        *)         echo "Unknown argument: $arg (expected 1-5 or --dry-run)" >&2; exit 1 ;;
+        --dry-run)   EXTRA_FLAGS="$EXTRA_FLAGS --dry-run" ;;
+        --overwrite) EXTRA_FLAGS="$EXTRA_FLAGS --overwrite" ;;
+        -v|--verbose) EXTRA_FLAGS="$EXTRA_FLAGS -v" ;;
+        [1-5])       BATCHES+=("$arg") ;;
+        *)           echo "Unknown argument: $arg (expected 1-5, --dry-run, --overwrite, or -v)" >&2; exit 1 ;;
     esac
 done
 
@@ -95,7 +99,7 @@ run_batch() {
     "$PYTHON" "$SCRIPT" \
         --notebook-list "$listfile" \
         --jobs "$JOBS" \
-        $DRY_RUN \
+        $EXTRA_FLAGS \
         2>&1 | tee -a "$logfile"
 
     local end_time elapsed_min
@@ -119,8 +123,8 @@ run_batch() {
 echo ""
 echo "ACL2 KG Summarization — Batch Runner"
 echo "Batches to run: ${BATCHES[*]}"
-if [[ -n "$DRY_RUN" ]]; then
-    echo "Mode: DRY RUN (no LLM calls)"
+if [[ -n "$EXTRA_FLAGS" ]]; then
+    echo "Flags:$EXTRA_FLAGS"
 fi
 echo ""
 
