@@ -1,0 +1,4 @@
+# Test batch: 3 small notebooks from batch 1 (one per topic area)
+books/centaur/fty/fixequiv.lisp
+books/std/osets/primitives.lisp
+books/ordinals/e0-ordinal.lisp

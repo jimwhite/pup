@@ -1,0 +1,3 @@
+books/textbook/chap11/qsort.lisp
+books/textbook/chap6/selected-solutions.lisp
+books/demos/marktoberdorf-08/lecture2-input.lsp

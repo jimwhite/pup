@@ -50,8 +50,10 @@ from weaviate.classes.config import (
 from weaviate.classes.query import Filter
 from weaviate.util import generate_uuid5
 
+from typing import Callable
+
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -706,13 +708,14 @@ claim, definition, or rationale.
 
 4. Do NOT merge unrelated ideas.
 5. Do NOT skip ideas.
-6. Do NOT summarize the whole cell as one idea unless it truly contains \
-only one.
+6. Do NOT summarize the whole cell as one idea unless it truly contains only one.
 
 7. Only omit report_how if:
    - The idea contains no implementation or mechanism detail.
 
-8. Every code cell with a definition or proof (i.e. a symbol) should yield at least 2 ideas (what+why, or what+how).
+8. Only use the cell number in the cell_number field.  Do NOT include the cell number in the summary text.
+
+9. Only provide descriptive information.  Do NOT include boilerplate phrases like "This cell...", "This is markdown that...", or "The following code...".
 
 Minimum expectation:
 - Any non-trivial function definition => at least 2 ideas
@@ -720,13 +723,10 @@ Minimum expectation:
 - Any technical comment paragraph => 1 idea per technical claim
 - Any include/import => 1 idea explaining its purpose
 
-If you extract fewer than 2 ideas from a non-trivial cell, re-evaluate \
-and decompose further.
+If you extract fewer than 2 ideas from a non-trivial cell, re-evaluate and decompose further.
 
 Use the cell_number argument (0-based cell index) to identify each cell.
-Use correct ACL2 terminology — name specific functions, macros, theorems, \
-and rules rather than speaking generically.
-{progress_section}
+Use correct ACL2 terminology — name specific functions, macros, theorems, and rules rather than speaking generically.
 {continuation_section}
 --- Cells ---
 {cells_text}"""
@@ -959,6 +959,37 @@ def _summary_tools_to_result(tool_calls: list[dict]) -> SummaryResult:
 # ─── Phase 1: Cell Summaries (batched tool calling) ─────────────────
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Strip wrapping markdown code fences from comment text.
+
+    The notebook converter wraps Lisp comments in bare ``` fences.
+    These are formatting artifacts — we don't want the LLM to see them.
+
+    TODO: Fix at ingest time — store only the raw comment text from the
+    .lisp file using the provenance comment_span, so fences never enter
+    the KG in the first place.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        # Remove opening fence line and closing fence
+        lines = text.splitlines(keepends=True)
+        # Find first ``` line
+        start = 0
+        for i, line in enumerate(lines):
+            if line.strip().startswith("```"):
+                start = i + 1
+                break
+        # Find last ``` line
+        end = len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip() == "```":
+                end = i
+                break
+        if start < end:
+            return "".join(lines[start:end])
+    return text
+
+
 def _build_batch_cells_text(cells: list[CellRecord]) -> str:
     """Format a batch of cells for the batch prompt."""
     parts: list[str] = []
@@ -966,6 +997,9 @@ def _build_batch_cells_text(cells: list[CellRecord]) -> str:
         content = c.code_text if c.cell_type == "code" else c.comment_text
         if not content:
             content = c.code_text or c.comment_text or "(empty)"
+        # Strip markdown fences from comment cells.
+        if c.cell_type != "code" and content:
+            content = _strip_markdown_fences(content)
         header = f"[Cell {c.cell_index}] ({c.cell_type}, package: {c.package or 'ACL2'})"
         if c.symbol_names:
             syms = ", ".join(
@@ -1005,8 +1039,19 @@ async def _cached_tool_call(
     model: str,
     cache: LLMCache | None,
     sem: asyncio.Semaphore,
+    tool_response_fn: Callable[[list[dict]], str] | None = None,
+    max_turns: int = 10,
 ) -> tuple[list[dict], bool]:
     """Invoke the LLM with tool calling and SQLite caching.
+
+    When *tool_response_fn* is provided, runs a multi-turn loop:
+    send the prompt, collect tool calls, respond with ``ToolMessage``s
+    (the last one in each round includes text from *tool_response_fn*),
+    and continue until the model sends no more tool calls or
+    *max_turns* is reached.
+
+    When *tool_response_fn* is ``None``, behaves as single-shot
+    (one ``ainvoke``, collect tool calls, done).
 
     Returns ``(tool_calls, was_cached)`` where *tool_calls* is a list
     of dicts: ``[{"name": ..., "args": {...}}, ...]``.
@@ -1016,18 +1061,70 @@ async def _cached_tool_call(
         if cached is not None:
             return json.loads(cached), True
 
-    async with sem:
-        response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
+    all_tool_calls: list[dict] = []
+    messages: list = [HumanMessage(content=prompt)]
 
-    tool_calls = [
-        {"name": tc["name"], "args": tc["args"]}
-        for tc in (response.tool_calls or [])
-    ]
+    # Log the initial prompt (truncate for readability).
+    prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
+    log.debug(">>> HumanMessage (%d chars):\n%s", len(prompt), prompt_preview)
+
+    async with sem:
+        for turn in range(max_turns):
+            t0 = time.monotonic()
+            response = await llm_with_tools.ainvoke(messages)
+            elapsed = time.monotonic() - t0
+
+            if not response.tool_calls:
+                # Log any trailing text content from the model.
+                tail = getattr(response, "content", "") or ""
+                log.debug(
+                    "<<< AIMessage turn %d (%.1fs, 0 tool calls)%s",
+                    turn + 1, elapsed,
+                    f": {tail[:200]}" if tail.strip() else "",
+                )
+                break  # Model is done — no more tool calls.
+
+            # Collect this turn's tool calls.
+            turn_calls = [
+                {"name": tc["name"], "args": tc["args"]}
+                for tc in response.tool_calls
+            ]
+            all_tool_calls.extend(turn_calls)
+
+            # Log every tool call from this turn.
+            log.debug(
+                "<<< AIMessage turn %d (%.1fs, %d tool calls, %d total):",
+                turn + 1, elapsed, len(turn_calls), len(all_tool_calls),
+            )
+            for tc in turn_calls:
+                args_str = json.dumps(tc["args"], ensure_ascii=False)
+                if len(args_str) > 300:
+                    args_str = args_str[:300] + "..."
+                log.debug("    tool: %s(%s)", tc["name"], args_str)
+
+            # Single-shot mode: one turn only.
+            if tool_response_fn is None:
+                break
+
+            # Multi-turn: append AIMessage + ToolMessages so the
+            # model can continue.
+            messages.append(response)  # The AIMessage with tool_calls.
+
+            progress_text = tool_response_fn(all_tool_calls)
+            for i, tc in enumerate(response.tool_calls):
+                is_last = (i == len(response.tool_calls) - 1)
+                content = progress_text if is_last else "Recorded."
+                messages.append(ToolMessage(
+                    content=content,
+                    tool_call_id=tc["id"],
+                ))
+
+            log.debug(">>> ToolMessage: %s", progress_text)
 
     if cache is not None:
-        cache.put(prompt, json.dumps(tool_calls), model)
+        cache.put(prompt, json.dumps(all_tool_calls), model)
 
-    return tool_calls, False
+    return all_tool_calls, False
 
 
 def _tool_calls_to_summaries(
@@ -1218,8 +1315,61 @@ async def summarize_cells(
                 cells_text=cells_text,
             )
 
+            # Build a progress callback for multi-turn tool calling.
+            # It computes which cells in this batch have been covered
+            # by the tool calls so far, so the model sees real-time
+            # coverage in the ToolMessage responses.
+            batch_indices = {c.cell_index for c in batch_cells}
+
+            def _make_progress_fn(
+                _cells=cells,
+                _batch_cells=batch_cells,
+                _batch_indices=batch_indices,
+            ):
+                # Compute batch-local category counts (denominators).
+                b_sym = sum(1 for c in _batch_cells if c.symbol_names)
+                b_code = sum(
+                    1 for c in _batch_cells
+                    if c.cell_type == "code" and not c.symbol_names
+                )
+                b_cmt = sum(
+                    1 for c in _batch_cells if c.cell_type == "markdown"
+                )
+
+                def fn(all_tcs: list[dict]) -> str:
+                    covered = set()
+                    for tc in all_tcs:
+                        cn = tc.get("args", {}).get("cell_number")
+                        if cn is not None and cn in _batch_indices:
+                            covered.add(cn)
+                    d_sym = sum(
+                        1 for c in _batch_cells
+                        if c.symbol_names and c.cell_index in covered
+                    )
+                    d_code = sum(
+                        1 for c in _batch_cells
+                        if c.cell_type == "code" and not c.symbol_names
+                        and c.cell_index in covered
+                    )
+                    d_cmt = sum(
+                        1 for c in _batch_cells
+                        if c.cell_type == "markdown"
+                        and c.cell_index in covered
+                    )
+                    batch_done = len(covered)
+                    batch_total = len(_batch_indices)
+                    return (
+                        f"Recorded. "
+                        f"{batch_done}/{batch_total} cells in this batch covered. "
+                        f"Breakdown: {d_sym}/{b_sym} symbol, "
+                        f"{d_code}/{b_code} code, {d_cmt}/{b_cmt} comment cells. "
+                        f"Continue with remaining cells."
+                    )
+                return fn
+
             tool_calls, was_cached = await _cached_tool_call(
                 prompt, llm_with_tools, model, cache, sem,
+                tool_response_fn=_make_progress_fn(),
             )
             if was_cached:
                 total_cached += 1
