@@ -19,3 +19,6 @@
 [submodule "external/parinfer-rust"]
 	path = external/parinfer-rust
 	url = https://github.com/jimwhite/parinfer-rust.git
+[submodule "external/acl2-kg-mcp"]
+	path = external/acl2-kg-mcp
+	url = https://github.com/wiki3-ai/acl2-kg-mcp.git

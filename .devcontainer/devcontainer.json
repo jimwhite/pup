@@ -51,6 +51,13 @@
                             "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
                             "PATH": "${containerWorkspaceFolder}/.venv/bin:/opt/acl2/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                         }
+                    },
+                    "acl2-kg-mcp": {
+                        "command": "${containerWorkspaceFolder}/.venv/bin/acl2-kg-mcp",
+                        "args": [],
+                        "env": {
+                            "WEAVIATE_HOST": "host.docker.internal"
+                        }
                     }
                 }
             }
