@@ -2366,20 +2366,38 @@ def migrate_summary_index(client: weaviate.WeaviateClient) -> int:
             batch_updates.append((str(obj.uuid), new_props))
 
     if not batch_updates:
-        log.info("No cell summaries need migration")
-        return 0
+        log.info("No cell summaries need summary_index migration")
+    else:
+        log.info("Migrating %d cell summaries to add summary_index...", len(batch_updates))
+        for uuid_str, props in batch_updates:
+            coll.data.update(
+                uuid=uuid_str,
+                properties=props,
+            )
+            migrated += 1
+        log.info("Migration complete: %d objects updated, %d portcullis deleted",
+                 migrated, portcullis_deleted)
 
-    log.info("Migrating %d cell summaries to add summary_index...", len(batch_updates))
-    for uuid_str, props in batch_updates:
-        coll.data.update(
-            uuid=uuid_str,
-            properties=props,
-        )
-        migrated += 1
+    # ── Backfill version on summaries that lack one ──────────────────
+    version_backfilled = 0
+    default_version = next(iter(SUMMARY_VERSIONS))  # first defined version
+    for obj in coll.iterator(
+        include_vector=False,
+        return_properties=["version"],
+    ):
+        v = obj.properties.get("version")
+        if not v:
+            coll.data.update(obj.uuid, properties={"version": default_version})
+            version_backfilled += 1
+            if version_backfilled % 1000 == 0:
+                log.info("  Backfilled version on %d summaries...",
+                         version_backfilled)
 
-    log.info("Migration complete: %d objects updated, %d portcullis deleted",
-             migrated, portcullis_deleted)
-    return migrated + portcullis_deleted
+    if version_backfilled:
+        log.info("Backfilled version='%s' on %d summaries",
+                 default_version, version_backfilled)
+
+    return migrated + portcullis_deleted + version_backfilled
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────
