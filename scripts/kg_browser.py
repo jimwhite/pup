@@ -59,6 +59,15 @@ app.jinja_env.globals["kind_color"] = lambda k: KIND_COLORS.get(k, "light")
 app.jinja_env.filters["commas"] = lambda n: f"{n:,}" if n else "0"
 
 
+@app.context_processor
+def inject_versions():
+    """Make available summary versions and selected version available in all templates."""
+    client = _get_client()
+    versions = _get_available_versions(client)
+    selected_version = request.args.get("version", "")
+    return {"available_versions": versions, "selected_version": selected_version}
+
+
 # ── Routes ───────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -94,6 +103,7 @@ def search():
     target = request.args.get("target", "symbol")
     mode = request.args.get("mode", "semantic")
     limit = min(int(request.args.get("limit", "50")), 200)
+    version = request.args.get("version") or None
 
     if not q:
         return redirect(url_for("index"))
@@ -133,7 +143,7 @@ def search():
                 nb_src = c.get("notebook_source", "")
                 ci = c.get("cell_index", -1)
                 if nb_src and ci >= 0:
-                    sums = _get_cell_summaries(client, nb_src)
+                    sums = _get_cell_summaries(client, nb_src, version=version)
                     sl = sums.get(ci, [])
                     if sl:
                         summary_what = sl[0].get("what", "")
@@ -171,7 +181,7 @@ def search():
             ci = obj.properties.get("cell_index", 0)
             summary_what = ""
             if nb_src:
-                sums = _get_cell_summaries(client, nb_src)
+                sums = _get_cell_summaries(client, nb_src, version=version)
                 sl = sums.get(ci, [])
                 if sl:
                     summary_what = sl[0].get("what", "")
@@ -191,14 +201,24 @@ def search():
         except Exception:
             col = None
         if col:
+            version_filter = None
+            if version:
+                version_filter = Filter.by_property("version").equal(version)
             if mode == "semantic":
-                resp = col.query.near_text(
-                    query=q, limit=limit, target_vector="what_vector",
-                    return_metadata=MetadataQuery(distance=True),
-                )
+                kwargs = {
+                    "query": q, "limit": limit,
+                    "target_vector": "what_vector",
+                    "return_metadata": MetadataQuery(distance=True),
+                }
+                if version_filter:
+                    kwargs["filters"] = version_filter
+                resp = col.query.near_text(**kwargs)
             else:
+                filt = Filter.by_property("what_summary").like(f"*{q}*")
+                if version_filter:
+                    filt = filt & version_filter
                 resp = col.query.fetch_objects(
-                    filters=Filter.by_property("what_summary").like(f"*{q}*"),
+                    filters=filt,
                     limit=limit,
                 )
             for obj in resp.objects:
@@ -229,6 +249,7 @@ def symbol_detail():
     qn = request.args.get("qn", "").strip()
     if not qn:
         return redirect(url_for("index"))
+    version = request.args.get("version") or None
 
     client = _get_client()
     sym = client.collections.get("ACL2Symbol")
@@ -294,7 +315,7 @@ def symbol_detail():
     # Cell summaries for the defining cell
     cell_summaries = []
     if defining_cell:
-        sums = _get_cell_summaries(client, defining_cell["notebook"])
+        sums = _get_cell_summaries(client, defining_cell["notebook"], version=version)
         cell_summaries = sums.get(defining_cell["cell_index"], [])
 
     return render_template("symbol.html",
@@ -307,6 +328,7 @@ def symbol_detail():
 @app.route("/notebook/<path:source_file>")
 def notebook_view(source_file):
     client = _get_client()
+    version = request.args.get("version") or None
 
     # Notebook metadata
     nb_col = client.collections.get("ACL2Notebook")
@@ -363,8 +385,8 @@ def notebook_view(source_file):
     highlight = request.args.get("cell", type=int)
 
     # Fetch summaries
-    cell_sums = _get_cell_summaries(client, source_file)
-    nb_summary = _get_notebook_summary(client, source_file)
+    cell_sums = _get_cell_summaries(client, source_file, version=version)
+    nb_summary = _get_notebook_summary(client, source_file, version=version)
 
     return render_template("notebook.html",
                            notebook=notebook, source_file=source_file,
@@ -376,6 +398,7 @@ def notebook_view(source_file):
 @app.route("/notebooks")
 def notebook_list():
     q = request.args.get("q", "").strip()
+    version = request.args.get("version") or None
     client = _get_client()
     nb_col = client.collections.get("ACL2Notebook")
 
@@ -396,7 +419,7 @@ def notebook_list():
     nb_summaries = {}
     for nb in notebooks:
         sf = nb["source_file"]
-        s = _get_notebook_summary(client, sf)
+        s = _get_notebook_summary(client, sf, version=version)
         if s and s.get("what"):
             nb_summaries[sf] = s["what"]
 
@@ -413,6 +436,7 @@ def summaries():
     scope = request.args.get("scope", "all")
     vector = request.args.get("vector", "what_vector")
     limit = min(int(request.args.get("limit", "50")), 200)
+    version = request.args.get("version") or None
 
     client = _get_client()
     try:
@@ -422,14 +446,21 @@ def summaries():
                                vector=vector, results=[], count=0,
                                error="ACL2Summary collection not found. Run summarize_kg.py first.")
 
+    version_filter = None
+    if version:
+        version_filter = Filter.by_property("version").equal(version)
+
     results = []
 
     if q:
         # Semantic search across summaries
-        resp = col.query.near_text(
-            query=q, limit=limit, target_vector=vector,
-            return_metadata=MetadataQuery(distance=True),
-        )
+        kwargs = {
+            "query": q, "limit": limit, "target_vector": vector,
+            "return_metadata": MetadataQuery(distance=True),
+        }
+        if version_filter:
+            kwargs["filters"] = version_filter
+        resp = col.query.near_text(**kwargs)
         for obj in resp.objects:
             p = obj.properties
             if scope != "all" and p.get("scope") != scope:
@@ -454,6 +485,8 @@ def summaries():
             filt = None
         else:
             filt = Filter.by_property("scope").equal(scope)
+        if version_filter:
+            filt = (filt & version_filter) if filt else version_filter
         resp = col.query.fetch_objects(filters=filt, limit=limit)
         for obj in resp.objects:
             p = obj.properties
@@ -510,25 +543,26 @@ def summary_detail(ref_key):
     return render_template("summary_detail.html", summary=summary)
 
 
-def _get_cell_summaries(client, source_file):
+def _get_cell_summaries(client, source_file, version=None):
     """Fetch all cell-level summaries for a notebook.
 
     Returns ``dict[int, list[dict]]`` — a list of summary dicts per
     cell_index, sorted by ``summary_index``.  Each dict contains
-    ``what``, ``why``, ``how``, and ``summary_index``.
+    ``what``, ``why``, ``how``, ``summary_index``, ``version``, ``symbol``.
     """
     try:
         col = client.collections.get("ACL2Summary")
     except Exception:
         return {}
 
-    resp = col.query.fetch_objects(
-        filters=(
-            Filter.by_property("scope").equal("cell")
-            & Filter.by_property("source_file").equal(source_file)
-        ),
-        limit=10000,
+    filt = (
+        Filter.by_property("scope").equal("cell")
+        & Filter.by_property("source_file").equal(source_file)
     )
+    if version:
+        filt = filt & Filter.by_property("version").equal(version)
+
+    resp = col.query.fetch_objects(filters=filt, limit=10000)
 
     sums: dict[int, list[dict]] = {}
     for obj in resp.objects:
@@ -542,6 +576,8 @@ def _get_cell_summaries(client, source_file):
                 "why": p.get("why_summary", ""),
                 "how": p.get("how_summary", ""),
                 "summary_index": p.get("summary_index", 0),
+                "version": p.get("version", ""),
+                "symbol": p.get("symbol", ""),
             })
     # Sort each cell's summaries by summary_index
     for lst in sums.values():
@@ -549,20 +585,21 @@ def _get_cell_summaries(client, source_file):
     return sums
 
 
-def _get_notebook_summary(client, source_file):
+def _get_notebook_summary(client, source_file, version=None):
     """Fetch the notebook-level summary."""
     try:
         col = client.collections.get("ACL2Summary")
     except Exception:
         return None
 
-    resp = col.query.fetch_objects(
-        filters=(
-            Filter.by_property("scope").equal("notebook")
-            & Filter.by_property("source_file").equal(source_file)
-        ),
-        limit=1,
+    filt = (
+        Filter.by_property("scope").equal("notebook")
+        & Filter.by_property("source_file").equal(source_file)
     )
+    if version:
+        filt = filt & Filter.by_property("version").equal(version)
+
+    resp = col.query.fetch_objects(filters=filt, limit=1)
     for obj in resp.objects:
         p = obj.properties
         if p.get("source_file") == source_file:
@@ -570,8 +607,24 @@ def _get_notebook_summary(client, source_file):
                 "what": p.get("what_summary", ""),
                 "why": p.get("why_summary", ""),
                 "how": p.get("how_summary", ""),
+                "version": p.get("version", ""),
             }
     return None
+
+
+def _get_available_versions(client):
+    """Return sorted list of distinct summary version labels."""
+    try:
+        col = client.collections.get("ACL2Summary")
+        agg = col.aggregate.over_all(group_by="version", total_count=True)
+        versions = sorted(
+            v.grouped_by.value
+            for v in agg.groups
+            if v.grouped_by.value
+        )
+        return versions
+    except Exception:
+        return []
 
 
 # ── Main ─────────────────────────────────────────────────────────────

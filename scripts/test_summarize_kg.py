@@ -19,11 +19,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 from summarize_kg import (
     CellRecord,
     SummaryResult,
+    LLMCache,
+    SUMMARY_VERSIONS,
+    PROMPTS_DIR,
     _strip_markdown_fences,
     _build_batch_cells_text,
     _batch_cells_by_size,
     _summary_tools_to_result,
     _tool_calls_to_summaries,
+    _load_prompt_templates,
+    _render_prompt,
 )
 
 
@@ -729,3 +734,202 @@ class TestDuplicateFiltering:
         ]
         summaries, _ = _tool_calls_to_summaries(tcs)
         assert len(summaries[2]) == 1
+
+
+# ── Symbol extraction in _tool_calls_to_summaries ────────────────────
+
+
+class TestSymbolExtraction:
+    """Verify that the `symbol` field is extracted from Report tool args."""
+
+    def test_symbol_from_report_what(self):
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W", "symbol": "ACL2::FOO"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert summaries[0][0].symbol == "ACL2::FOO"
+
+    def test_no_symbol_defaults_empty(self):
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert summaries[0][0].symbol == ""
+
+    def test_symbol_from_why_fills_missing(self):
+        """ReportWhy sets symbol when ReportWhat didn't provide one."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W"}},
+            {"name": "ReportWhy", "args": {"cell_number": 0, "summary": "Y", "symbol": "ACL2::BAR"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert summaries[0][0].symbol == "ACL2::BAR"
+
+    def test_symbol_from_what_not_overridden_by_why(self):
+        """ReportWhy does NOT override symbol already set by ReportWhat."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W", "symbol": "ACL2::FIRST"}},
+            {"name": "ReportWhy", "args": {"cell_number": 0, "summary": "Y", "symbol": "ACL2::SECOND"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert summaries[0][0].symbol == "ACL2::FIRST"
+
+    def test_multi_summary_symbols(self):
+        """Each ReportWhat starts a new summary with its own symbol."""
+        tcs = [
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W1", "symbol": "ACL2::A"}},
+            {"name": "ReportWhat", "args": {"cell_number": 0, "summary": "W2", "symbol": "ACL2::B"}},
+        ]
+        summaries, _ = _tool_calls_to_summaries(tcs)
+        assert len(summaries[0]) == 2
+        assert summaries[0][0].symbol == "ACL2::A"
+        assert summaries[0][1].symbol == "ACL2::B"
+
+
+# ── LLMCache model-aware hashing ────────────────────────────────────
+
+
+class TestLLMCacheModelAware:
+    """Verify that LLMCache hashes include the model string."""
+
+    @pytest.fixture
+    def cache(self, tmp_path):
+        c = LLMCache(str(tmp_path / "test_cache.db"))
+        yield c
+        c.close()
+
+    def test_same_prompt_different_model_no_collision(self, cache):
+        """Same prompt text with different models should not collide."""
+        cache.put("hello world", "response_a", "model-a")
+        cache.put("hello world", "response_b", "model-b")
+
+        assert cache.get("hello world", "model-a") == "response_a"
+        assert cache.get("hello world", "model-b") == "response_b"
+
+    def test_default_model_empty_string(self, cache):
+        """Default model='' works for backward compat."""
+        cache.put("prompt", "result", "")
+        assert cache.get("prompt", "") == "result"
+        # Different model should not collide
+        assert cache.get("prompt", "some-model") is None
+
+    def test_cache_miss_returns_none(self, cache):
+        assert cache.get("nonexistent", "model") is None
+
+    def test_put_overwrites(self, cache):
+        cache.put("p", "old", "m")
+        cache.put("p", "new", "m")
+        assert cache.get("p", "m") == "new"
+
+    def test_count(self, cache):
+        assert cache.count() == 0
+        cache.put("a", "1", "m")
+        cache.put("b", "2", "m")
+        assert cache.count() == 2
+
+
+# ── Portcullis filtering ────────────────────────────────────────────
+
+
+class TestPortcullisFiltering:
+    """Verify that portcullis cells are excluded from summarization."""
+
+    def test_portcullis_cell_record(self):
+        """CellRecord with is_portcullis=True should be filterable."""
+        normal = CellRecord(
+            notebook_source="test.lisp", cell_index=0, cell_type="code",
+            code_text="(defun f (x) x)", comment_text="", package="ACL2",
+            is_portcullis=False, symbol_names=[], symbol_kinds=[],
+        )
+        portcullis = CellRecord(
+            notebook_source="test.lisp", cell_index=1, cell_type="code",
+            code_text="(set-in-theory ...)", comment_text="", package="ACL2",
+            is_portcullis=True, symbol_names=[], symbol_kinds=[],
+        )
+        cells = [normal, portcullis]
+        filtered = [c for c in cells if not c.is_portcullis]
+        assert len(filtered) == 1
+        assert filtered[0].cell_index == 0
+
+
+# ── SUMMARY_VERSIONS dict integrity ─────────────────────────────────
+
+
+class TestSummaryVersions:
+    """Ensure SUMMARY_VERSIONS is well-formed."""
+
+    def test_has_at_least_one_version(self):
+        assert len(SUMMARY_VERSIONS) >= 1
+
+    def test_all_entries_have_required_keys(self):
+        for label, entry in SUMMARY_VERSIONS.items():
+            assert isinstance(label, str), f"Version label must be str, got {type(label)}"
+            assert "model" in entry, f"Version '{label}' missing 'model'"
+            assert "prompts" in entry, f"Version '{label}' missing 'prompts'"
+            assert "description" in entry, f"Version '{label}' missing 'description'"
+
+    def test_prompt_dirs_exist(self):
+        """Each version's prompts directory should exist under PROMPTS_DIR."""
+        for label, entry in SUMMARY_VERSIONS.items():
+            prompt_dir = PROMPTS_DIR / entry["prompts"]
+            assert prompt_dir.is_dir(), (
+                f"Version '{label}' references prompts dir "
+                f"'{entry['prompts']}' but {prompt_dir} does not exist"
+            )
+
+
+# ── Jinja template loading ──────────────────────────────────────────
+
+
+class TestJinjaTemplates:
+    """Test _load_prompt_templates and _render_prompt."""
+
+    def test_load_templates_returns_environment(self):
+        """_load_prompt_templates returns a Jinja2 Environment or None."""
+        env = _load_prompt_templates("v1")
+        if env is not None:
+            import jinja2
+            assert isinstance(env, jinja2.Environment)
+
+    def test_load_templates_nonexistent_raises(self):
+        """Non-existent version label raises FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            _load_prompt_templates("nonexistent_version_xyz_999")
+
+    def test_render_prompt_with_env(self):
+        """_render_prompt uses Jinja template when env is available."""
+        env = _load_prompt_templates("v1")
+        if env is None:
+            pytest.skip("v1 templates not found")
+        result = _render_prompt(
+            env, "cell_batch.j2", "fallback {source_file}",
+            source_file="test/file.lisp",
+            topic_section="",
+            continuation_section="",
+            cells_text="(defun f (x) x)",
+        )
+        assert "test/file.lisp" in result
+        assert "(defun f (x) x)" in result
+
+    def test_render_prompt_fallback(self):
+        """_render_prompt uses fallback format string when env is None."""
+        result = _render_prompt(
+            None, "cell_batch.j2", "File: {source_file}, Cells: {cells_text}",
+            source_file="test.lisp",
+            cells_text="code here",
+        )
+        assert result == "File: test.lisp, Cells: code here"
+
+    def test_all_v1_templates_exist(self):
+        """All expected template files exist in v1."""
+        expected_templates = [
+            "cell_batch.j2", "notebook_chunk.j2",
+            "notebook_reduce.j2", "directory.j2",
+        ]
+        env = _load_prompt_templates("v1")
+        if env is None:
+            pytest.skip("v1 templates not found")
+        for name in expected_templates:
+            # Should not raise TemplateNotFound
+            tmpl = env.get_template(name)
+            assert tmpl is not None

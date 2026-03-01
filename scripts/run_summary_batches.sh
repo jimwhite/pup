@@ -13,6 +13,8 @@
 #   ./scripts/run_summary_batches.sh --dry-run 1  # Dry-run batch 1
 #   ./scripts/run_summary_batches.sh -v 1        # Verbose (LLM message log)
 #   ./scripts/run_summary_batches.sh --overwrite 1 # Re-run batch 1 from scratch
+#   ./scripts/run_summary_batches.sh --version=v2-groq 1  # Use version label
+#   SUMMARY_VERSION=v2-groq ./scripts/run_summary_batches.sh 1  # Via env var
 #
 # Logs are written to logs/batch-N-YYYYMMDD-HHMMSS.log
 #
@@ -24,6 +26,7 @@ SCRIPT="scripts/summarize_kg.py"
 LISTDIR="scripts/batch-lists"
 LOGDIR="logs"
 JOBS="${JOBS:-4}"
+VERSION="${SUMMARY_VERSION:-}"
 
 # ── Parse flags vs batch numbers ────────────────────────────────────
 EXTRA_FLAGS=""
@@ -34,10 +37,16 @@ for arg in "$@"; do
         --dry-run)   EXTRA_FLAGS="$EXTRA_FLAGS --dry-run" ;;
         --overwrite) EXTRA_FLAGS="$EXTRA_FLAGS --overwrite" ;;
         -v|--verbose) EXTRA_FLAGS="$EXTRA_FLAGS -v" ;;
+        --version=*) VERSION="${arg#--version=}" ;;
         [1-5])       BATCHES+=("$arg") ;;
-        *)           echo "Unknown argument: $arg (expected 1-5, --dry-run, --overwrite, or -v)" >&2; exit 1 ;;
+        *)           echo "Unknown argument: $arg (expected 1-5, --dry-run, --overwrite, --version=LABEL, or -v)" >&2; exit 1 ;;
     esac
 done
+
+# Add --version flag if set
+if [[ -n "$VERSION" ]]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --version $VERSION"
+fi
 
 # Default: all batches
 if [[ ${#BATCHES[@]} -eq 0 ]]; then
@@ -123,6 +132,9 @@ run_batch() {
 echo ""
 echo "ACL2 KG Summarization — Batch Runner"
 echo "Batches to run: ${BATCHES[*]}"
+if [[ -n "$VERSION" ]]; then
+    echo "Version: $VERSION"
+fi
 if [[ -n "$EXTRA_FLAGS" ]]; then
     echo "Flags:$EXTRA_FLAGS"
 fi

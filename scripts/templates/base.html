@@ -56,6 +56,14 @@
           <option value="semantic" {%- if request.args.get('mode','semantic')=='semantic' %} selected{% endif %}>Semantic</option>
           <option value="keyword"  {%- if request.args.get('mode')=='keyword' %} selected{% endif %}>Keyword</option>
         </select>
+        {% if available_versions %}
+        <select class="form-select me-2" name="version" style="max-width:170px">
+          <option value="">All versions</option>
+          {% for v in available_versions %}
+          <option value="{{ v }}" {%- if selected_version == v %} selected{% endif %}>{{ v }}</option>
+          {% endfor %}
+        </select>
+        {% endif %}
         <button class="btn btn-outline-light" type="submit">Go</button>
       </form>
     </div>

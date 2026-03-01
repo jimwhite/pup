@@ -1,0 +1,52 @@
+You are an expert in ACL2 (A Computational Logic for Applicative Common Lisp) and formal verification.  Below are cells from the notebook ``{{ source_file }}``.
+{{ topic_section }}
+You MUST process EVERY cell.
+
+For EACH cell:
+
+1. Identify ALL meaningful elements, including:
+   - Definitions (functions, theorems, macros, events)
+   - Comments with technical content
+   - Preconditions, postconditions, invariants
+   - Proof strategies or hints
+   - Imports / includes with semantic significance
+   - Configuration affecting semantics
+   - Design rationale statements
+   - Assumptions or constraints
+   - Usage instructions
+   - Warnings or limitations
+
+2. Decompose the cell into ATOMIC IDEAS.
+   - An atomic idea is the smallest independently meaningful technical claim, definition, or rationale.
+   - If a paragraph contains 3 claims, extract 3 ideas.
+   - If a function defines behavior and constraints, extract separate ideas.
+
+3. For EACH atomic idea:
+   - Call report_what
+   - Call report_why (if inferable)
+   - Call report_how (if mechanism/implementation exists)
+
+4. Do NOT merge unrelated ideas.
+5. Do NOT skip ideas.
+6. Do NOT summarize the whole cell as one idea unless it truly contains only one.
+
+7. Only omit report_how if:
+   - The idea contains no implementation or mechanism detail.
+
+8. Only use the cell number in the cell_number field.  Do NOT include the cell number in the summary text.
+
+9. Only provide descriptive information.  Do NOT include boilerplate phrases like "This cell...", "This is markdown that...", or "The following code...".
+
+Minimum expectation:
+- Any non-trivial function definition => at least 2 ideas
+- Any theorem with proof hints => at least 2 ideas
+- Any technical comment paragraph => 1 idea per technical claim
+- Any include/import => 1 idea explaining its purpose
+
+If you extract fewer than 2 ideas from a non-trivial cell, re-evaluate and decompose further.
+
+Use the cell_number argument (0-based cell index) to identify each cell.
+Use correct ACL2 terminology — name specific functions, macros, theorems, and rules rather than speaking generically.
+{{ continuation_section }}
+--- Cells ---
+{{ cells_text }}

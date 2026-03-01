@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +40,8 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import jinja2
 
 import weaviate
 from weaviate.classes.config import (
@@ -73,12 +76,62 @@ DEFAULT_BATCH_SIZE = 200
 DEFAULT_JOBS = 4
 DEFAULT_CACHE_PATH = "scripts/.llm_cache.sqlite"
 CHECKPOINT_FILE = "scripts/.summarize_checkpoint.json"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 # Maximum cell summaries per notebook chunk in the map step.
 NOTEBOOK_CHUNK_SIZE = 20
 DEFAULT_CONTEXT_SIZE = 8192
 
 log = logging.getLogger("summarize-kg")
+
+# ─── Summary version registry ───────────────────────────────────────
+#
+# Each entry maps a version label to the model it was produced with
+# and the prompt template directory under scripts/prompts/.
+# The version label is stored on every ACL2Summary object so that
+# summaries from different models/prompts can coexist and be filtered.
+
+SUMMARY_VERSIONS: dict[str, dict] = {
+    "v1-qwen3-coder": {
+        "model": "qwen/qwen3-coder-next",
+        "prompts": "v1",
+        "description": "Initial LM Studio run with qwen3-coder-next",
+    },
+    "v2-groq-gpt-oss": {
+        "model": "gpt-oss-20b",
+        "prompts": "v2",
+        "description": "Groq API with gpt-oss-20b, symbol tagging",
+    },
+}
+
+
+def _load_prompt_templates(
+    prompts_label: str,
+) -> jinja2.Environment:
+    """Load Jinja2 prompt templates from ``scripts/prompts/{label}/``."""
+    template_dir = PROMPTS_DIR / prompts_label
+    if not template_dir.is_dir():
+        raise FileNotFoundError(
+            f"Prompt template directory not found: {template_dir}"
+        )
+    return jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(template_dir)),
+        keep_trailing_newline=True,
+        undefined=jinja2.StrictUndefined,
+    )
+
+
+def _render_prompt(
+    jinja_env: jinja2.Environment | None,
+    template_name: str,
+    fallback_template: str,
+    **kwargs,
+) -> str:
+    """Render a prompt from a Jinja template, falling back to str.format()."""
+    if jinja_env is not None:
+        tmpl = jinja_env.get_template(template_name)
+        return tmpl.render(**kwargs)
+    return fallback_template.format(**kwargs)
 
 
 # ─── Topic context for targeted prompts ──────────────────────────────
@@ -495,6 +548,7 @@ class SummaryResult:
     what: str = ""
     why: str = ""
     how: str = ""
+    symbol: str = ""
 
 
 # ─── Tool-calling models for batched cell summaries ─────────────────
@@ -508,6 +562,11 @@ class ReportWhat(BaseModel):
         description="What this cell defines, proves, or configures.  "
         "1-3 precise sentences covering one distinct idea."
     )
+    symbol: str | None = Field(
+        default=None,
+        description="The specific symbol (from the Defines: header) "
+        "this idea pertains to, if applicable.",
+    )
 
 
 class ReportWhy(BaseModel):
@@ -518,6 +577,11 @@ class ReportWhy(BaseModel):
         description="Why this matters — the goal, problem solved, or proof "
         "obligation discharged.  1-3 sentences for one distinct idea."
     )
+    symbol: str | None = Field(
+        default=None,
+        description="The specific symbol (from the Defines: header) "
+        "this idea pertains to, if applicable.",
+    )
 
 
 class ReportHow(BaseModel):
@@ -527,6 +591,11 @@ class ReportHow(BaseModel):
     summary: str = Field(
         description="Usage instructions — how to call/invoke/include.  "
         "1-3 sentences for one distinct idea."
+    )
+    symbol: str | None = Field(
+        default=None,
+        description="The specific symbol (from the Defines: header) "
+        "this idea pertains to, if applicable.",
     )
 
 
@@ -597,10 +666,10 @@ class LLMCache:
             self._conn.commit()
         return self._conn
 
-    def get(self, prompt: str) -> str | None:
+    def get(self, prompt: str, model: str = "") -> str | None:
         """Return cached response or None."""
         conn = self._connect()
-        h = str(generate_uuid5(prompt))
+        h = str(generate_uuid5(f"{model}\n{prompt}"))
         row = conn.execute(
             "SELECT response FROM llm_cache WHERE prompt_hash = ?", (h,)
         ).fetchone()
@@ -609,7 +678,7 @@ class LLMCache:
     def put(self, prompt: str, response: str, model: str) -> None:
         """Store an LLM response."""
         conn = self._connect()
-        h = str(generate_uuid5(prompt))
+        h = str(generate_uuid5(f"{model}\n{prompt}"))
         conn.execute(
             "INSERT OR REPLACE INTO llm_cache (prompt_hash, prompt_text, response, model) VALUES (?, ?, ?, ?)",
             (h, prompt, response, model),
@@ -848,6 +917,19 @@ def _fetch_cells_for_notebook(
         ))
 
     cells.sort(key=lambda c: c.cell_index)
+
+    # Filter out portcullis cells — they are boilerplate guard events
+    # (e.g. in-package, certify-book) that don't need summarization.
+    n_before = len(cells)
+    cells = [c for c in cells if not c.is_portcullis]
+    n_dropped = n_before - len(cells)
+    if n_dropped:
+        log.debug(
+            "%s: dropped %d portcullis cells (%d remaining)",
+            cells[0].notebook_source if cells else notebook_source,
+            n_dropped, len(cells),
+        )
+
     return cells
 
 
@@ -1062,7 +1144,7 @@ async def _cached_tool_call(
     of dicts: ``[{"name": ..., "args": {...}}, ...]``.
     """
     if cache is not None:
-        cached = cache.get(prompt)
+        cached = cache.get(prompt, model)
         if cached is not None:
             return json.loads(cached), True
 
@@ -1180,22 +1262,30 @@ def _tool_calls_to_summaries(
 
         current = summaries[cell_num][-1]
 
+        symbol = args.get("symbol") or ""
+
         if name == "ReportWhat":
             # A new ReportWhat when we already have one → new idea.
             if current.what:
                 summaries[cell_num].append(SummaryResult())
                 current = summaries[cell_num][-1]
             current.what = text
+            if symbol:
+                current.symbol = symbol
         elif name == "ReportWhy":
             if current.why:
                 summaries[cell_num].append(SummaryResult())
                 current = summaries[cell_num][-1]
             current.why = text
+            if symbol and not current.symbol:
+                current.symbol = symbol
         elif name == "ReportHow":
             if current.how:
                 summaries[cell_num].append(SummaryResult())
                 current = summaries[cell_num][-1]
             current.how = text
+            if symbol and not current.symbol:
+                current.symbol = symbol
 
     return summaries, continuation
 
@@ -1211,6 +1301,8 @@ async def summarize_cells(
     checkpoint: dict,
     context_size: int = DEFAULT_CONTEXT_SIZE,
     dry_run: bool = False,
+    jinja_env: jinja2.Environment | None = None,
+    version: str = "",
 ) -> dict[str, list[tuple[int, int, SummaryResult]]]:
     """Phase 1: Generate cell-level summaries via batched tool calling.
 
@@ -1325,10 +1417,12 @@ async def summarize_cells(
                 f"{done_cmt} of {n_comment_cells} comment cells.\n"
             )
 
-            prompt = BATCH_CELL_PROMPT.format(
+            prompt = _render_prompt(
+                jinja_env,
+                "cell_batch.j2",
+                BATCH_CELL_PROMPT,
                 source_file=nb_src,
                 topic_section=_format_topic_section(nb_src),
-                progress_section=progress_section,
                 continuation_section=cont_section,
                 cells_text=cells_text,
             )
@@ -1356,6 +1450,19 @@ async def summarize_cells(
                 _min_idx = min(_batch_indices)
                 _max_idx = max(_batch_indices)
                 _seen: set[tuple] = set()  # (cell_number, name, text)
+
+                # Build a mapping from cell_index → set of defined
+                # symbols (bare and qualified) for symbol validation.
+                _cell_syms: dict[int, set[str]] = {}
+                for _c in _batch_cells:
+                    if _c.symbol_names:
+                        names: set[str] = set()
+                        for sn in _c.symbol_names:
+                            names.add(sn.upper())
+                            # Also allow the bare name (without package prefix).
+                            if "::" in sn:
+                                names.add(sn.split("::", 1)[1].upper())
+                        _cell_syms[_c.cell_index] = names
 
                 def fn(
                     all_tcs: list[dict],
@@ -1388,9 +1495,18 @@ async def summarize_cells(
                                 )
                             else:
                                 _seen.add(key)
-                                responses.append(
-                                    f"Recorded cell {cn}."
-                                )
+                                msg = f"Recorded cell {cn}."
+                                # Validate symbol if supplied.
+                                sym = args.get("symbol")
+                                if sym and cn in _cell_syms:
+                                    sym_up = sym.upper()
+                                    if sym_up not in _cell_syms[cn]:
+                                        msg += (
+                                            f" Note: symbol '{sym}' does "
+                                            f"not match any defined symbol "
+                                            f"in this cell."
+                                        )
+                                responses.append(msg)
                         else:
                             responses.append(
                                 f"Recorded cell {cn}."
@@ -1490,7 +1606,9 @@ async def summarize_cells(
                     )
                     for si, summary in enumerate(sum_list):
                         ref_key = f"{nb_src}:{cell_idx}:{si}"
-                        uuid = str(generate_uuid5(f"summary:cell:{ref_key}"))
+                        uuid = str(generate_uuid5(
+                            f"summary:cell:{ref_key}:{version}"
+                        ))
                         upsert_items.append({
                             "uuid": uuid,
                             "properties": {
@@ -1506,6 +1624,8 @@ async def summarize_cells(
                                 "symbol_names": (
                                     cell_rec.symbol_names if cell_rec else []
                                 ),
+                                "version": version,
+                                "symbol": summary.symbol or "",
                             },
                             "references": {
                                 "sourceNotebook": nb_uuid,
@@ -1566,6 +1686,8 @@ async def summarize_notebooks(
     checkpoint: dict,
     dry_run: bool = False,
     context_size: int = DEFAULT_CONTEXT_SIZE,
+    jinja_env: jinja2.Environment | None = None,
+    version: str = "",
 ) -> dict[str, SummaryResult]:
     """Phase 2: Generate notebook-level summaries via map-reduce over cell summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -1608,7 +1730,10 @@ async def summarize_notebooks(
 
         for chunk in chunks:
             cell_text = _format_cell_summaries(chunk)
-            prompt = NOTEBOOK_CHUNK_PROMPT.format(
+            prompt = _render_prompt(
+                jinja_env,
+                "notebook_chunk.j2",
+                NOTEBOOK_CHUNK_PROMPT,
                 source_file=nb_src,
                 topic_section=_format_topic_section(nb_src),
                 cell_summaries=cell_text,
@@ -1633,7 +1758,10 @@ async def summarize_notebooks(
                 for rc in reduce_chunks:
                     rc_sums = [s for _, _, s in rc]
                     rc_text = _format_intermediates(rc_sums)
-                    prompt = NOTEBOOK_REDUCE_PROMPT.format(
+                    prompt = _render_prompt(
+                        jinja_env,
+                        "notebook_reduce.j2",
+                        NOTEBOOK_REDUCE_PROMPT,
                         source_file=nb_src,
                         topic_section=_format_topic_section(nb_src),
                         section_summaries=rc_text,
@@ -1645,7 +1773,10 @@ async def summarize_notebooks(
                 intermediates = new_intermediates
                 section_text = _format_intermediates(intermediates)
 
-            prompt = NOTEBOOK_REDUCE_PROMPT.format(
+            prompt = _render_prompt(
+                jinja_env,
+                "notebook_reduce.j2",
+                NOTEBOOK_REDUCE_PROMPT,
                 source_file=nb_src,
                 topic_section=_format_topic_section(nb_src),
                 section_summaries=section_text,
@@ -1659,7 +1790,9 @@ async def summarize_notebooks(
 
         # Upsert to Weaviate.
         if summary_coll is not None:
-            uuid = str(generate_uuid5(f"summary:notebook:{ref_key}"))
+            uuid = str(generate_uuid5(
+                f"summary:notebook:{ref_key}:{version}"
+            ))
             nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))       
             with summary_coll.batch.fixed_size(batch_size=batch_size) as batch:
                 batch.add_object(
@@ -1673,6 +1806,8 @@ async def summarize_notebooks(
                         "cell_index": -1,
                         "directory": str(Path(nb_src).parent),
                         "symbol_names": [],
+                        "version": version,
+                        "symbol": "",
                     },
                     uuid=uuid,
                     references={"sourceNotebook": nb_uuid},
@@ -1839,6 +1974,8 @@ async def summarize_directories(
     checkpoint: dict,
     dry_run: bool = False,
     context_size: int = DEFAULT_CONTEXT_SIZE,
+    jinja_env: jinja2.Environment | None = None,
+    version: str = "",
 ) -> dict[str, SummaryResult]:
     """Phase 3: Bottom-up directory summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -1915,7 +2052,10 @@ async def summarize_directories(
         dir_topic = _format_topic_section(directory + "/")
 
         if len(content_chunks) == 1:
-            prompt = DIRECTORY_REDUCE_PROMPT.format(
+            prompt = _render_prompt(
+                jinja_env,
+                "directory.j2",
+                DIRECTORY_REDUCE_PROMPT,
                 directory=directory,
                 topic_section=dir_topic,
                 contents="\n\n".join(content_chunks[0]),
@@ -1928,7 +2068,10 @@ async def summarize_directories(
             # Multi-pass: summarize each chunk, then reduce.
             chunk_results: list[SummaryResult] = []
             for cc in content_chunks:
-                prompt = DIRECTORY_REDUCE_PROMPT.format(
+                prompt = _render_prompt(
+                    jinja_env,
+                    "directory.j2",
+                    DIRECTORY_REDUCE_PROMPT,
                     directory=directory,
                     topic_section=dir_topic,
                     contents="\n\n".join(cc),
@@ -1939,7 +2082,10 @@ async def summarize_directories(
                 chunk_results.append(_summary_tools_to_result(tcs))
             # Final reduce over chunk results.
             section_text = _format_intermediates(chunk_results)
-            prompt = DIRECTORY_REDUCE_PROMPT.format(
+            prompt = _render_prompt(
+                jinja_env,
+                "directory.j2",
+                DIRECTORY_REDUCE_PROMPT,
                 directory=directory,
                 topic_section=dir_topic,
                 contents=section_text,
@@ -1952,7 +2098,9 @@ async def summarize_directories(
 
         # Upsert to Weaviate.
         if summary_coll is not None:
-            uuid = str(generate_uuid5(f"summary:directory:{ref_key}"))
+            uuid = str(generate_uuid5(
+                f"summary:directory:{ref_key}:{version}"
+            ))
             with summary_coll.batch.fixed_size(batch_size=batch_size) as batch:
                 batch.add_object(
                     properties={
@@ -1965,6 +2113,8 @@ async def summarize_directories(
                         "cell_index": -1,
                         "directory": directory,
                         "symbol_names": [],
+                        "version": version,
+                        "symbol": "",
                     },
                     uuid=uuid,
                 )
@@ -2079,6 +2229,12 @@ def ensure_summary_collection(
             Property(name="symbol_names", data_type=DataType.TEXT_ARRAY,
                      skip_vectorization=True,
                      description="Symbols defined (cell scope)"),
+            Property(name="version", data_type=DataType.TEXT,
+                     skip_vectorization=True,
+                     description="Summary version label (e.g. v1-qwen3-coder)"),
+            Property(name="symbol", data_type=DataType.TEXT,
+                     skip_vectorization=True,
+                     description="Specific symbol this idea pertains to (cell scope)"),
         ],
         references=[
             ReferenceProperty(
@@ -2094,35 +2250,86 @@ def ensure_summary_collection(
 
 
 def _ensure_summary_index_property(client: weaviate.WeaviateClient) -> None:
-    """Add ``summary_index`` property if it doesn't exist yet."""
+    """Add missing properties (``summary_index``, ``version``, ``symbol``) if needed."""
     coll = client.collections.get(COLLECTION_SUMMARY)
     schema = coll.config.get()
     existing_names = {p.name for p in schema.properties}
-    if "summary_index" not in existing_names:
-        log.info("Adding summary_index property to %s", COLLECTION_SUMMARY)
-        coll.config.add_property(
-            Property(
-                name="summary_index",
-                data_type=DataType.INT,
-                skip_vectorization=True,
-                description="Summary index within cell (0-based, for multi-summary)",
+    new_props = [
+        ("summary_index", DataType.INT,
+         "Summary index within cell (0-based, for multi-summary)"),
+        ("version", DataType.TEXT,
+         "Summary version label (e.g. v1-qwen3-coder)"),
+        ("symbol", DataType.TEXT,
+         "Specific symbol this idea pertains to (cell scope)"),
+    ]
+    for name, dtype, desc in new_props:
+        if name not in existing_names:
+            log.info("Adding %s property to %s", name, COLLECTION_SUMMARY)
+            coll.config.add_property(
+                Property(
+                    name=name,
+                    data_type=dtype,
+                    skip_vectorization=True,
+                    description=desc,
+                )
             )
-        )
 
 
 def migrate_summary_index(client: weaviate.WeaviateClient) -> int:
-    """Migrate existing cell summaries to include ``summary_index``.
+    """Migrate existing summaries: add ``summary_index``, delete portcullis.
 
     For each scope="cell" object:
     - Sets ``summary_index`` to 0 if missing/null.
     - Rewrites ``ref_key`` from ``"nb:idx"`` to ``"nb:idx:0"``.
 
-    Returns the number of objects migrated.
+    Also deletes any cell summaries whose ``sourceCell`` references a
+    portcullis cell (``is_portcullis=True`` in ACL2Cell).
+
+    Returns the number of objects migrated + deleted.
     """
     _ensure_summary_index_property(client)
     coll = client.collections.get(COLLECTION_SUMMARY)
 
-    # Fetch all cell-scope objects.
+    # ── Identify portcullis cells to delete summaries for ────────────
+    cell_coll = client.collections.get(COLLECTION_CELL)
+    portcullis_uuids: set[str] = set()
+    for obj in cell_coll.iterator(
+        include_vector=False,
+        return_properties=["is_portcullis"],
+    ):
+        if obj.properties.get("is_portcullis"):
+            portcullis_uuids.add(str(obj.uuid))
+
+    log.info("Found %d portcullis cells", len(portcullis_uuids))
+
+    # ── Delete portcullis summaries ──────────────────────────────────
+    portcullis_deleted = 0
+    if portcullis_uuids:
+        to_delete: list[str] = []
+        for obj in coll.iterator(
+            include_vector=False,
+            return_properties=["scope"],
+            return_references=weaviate.classes.query.QueryReference(
+                link_on="sourceCell",
+                return_properties=[],
+            ),
+        ):
+            if obj.properties.get("scope") != "cell":
+                continue
+            refs = obj.references
+            if refs and "sourceCell" in refs:
+                for ref_obj in refs["sourceCell"].objects:
+                    if str(ref_obj.uuid) in portcullis_uuids:
+                        to_delete.append(str(obj.uuid))
+                        break
+
+        for uuid_str in to_delete:
+            coll.data.delete_by_id(uuid_str)
+            portcullis_deleted += 1
+
+        log.info("Deleted %d portcullis-linked summaries", portcullis_deleted)
+
+    # ── Migrate summary_index ────────────────────────────────────────
     migrated = 0
     batch_updates: list[tuple[str, dict]] = []
 
@@ -2170,8 +2377,9 @@ def migrate_summary_index(client: weaviate.WeaviateClient) -> int:
         )
         migrated += 1
 
-    log.info("Migration complete: %d objects updated", migrated)
-    return migrated
+    log.info("Migration complete: %d objects updated, %d portcullis deleted",
+             migrated, portcullis_deleted)
+    return migrated + portcullis_deleted
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────
@@ -2288,12 +2496,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Ollama embedding model (default: {DEFAULT_EMBED_MODEL})",
     )
     p.add_argument(
-        "--lm-studio-url", default=DEFAULT_LM_STUDIO_URL,
-        help=f"LM Studio base URL (default: {DEFAULT_LM_STUDIO_URL})",
+        "--base-url", "--lm-studio-url",
+        dest="base_url",
+        default=os.environ.get("LLM_BASE_URL", DEFAULT_LM_STUDIO_URL),
+        help=f"LLM API base URL (env: LLM_BASE_URL, default: {DEFAULT_LM_STUDIO_URL})",
     )
     p.add_argument(
-        "--model", default=None,
-        help="LLM model name (auto-detected from LM Studio if not set)",
+        "--api-key",
+        default=os.environ.get("LLM_API_KEY", "lm-studio"),
+        help="LLM API key (env: LLM_API_KEY, default: lm-studio)",
+    )
+    p.add_argument(
+        "--model", default=os.environ.get("LLM_MODEL"),
+        help="LLM model name (env: LLM_MODEL; auto-detected from LM Studio if not set)",
+    )
+    p.add_argument(
+        "--version",
+        default=os.environ.get("SUMMARY_VERSION", "v1-qwen3-coder"),
+        choices=list(SUMMARY_VERSIONS.keys()),
+        help="Summary version label (env: SUMMARY_VERSION, default: v1-qwen3-coder)",
     )
     p.add_argument(
         "--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
@@ -2365,16 +2586,41 @@ async def async_main(args: argparse.Namespace) -> int:
         log.info("LLM cache disabled")
 
     # ── LLM setup ────────────────────────────────────────────────────
-    model = args.model or os.environ.get("LM_STUDIO_MODEL")
+    version_label = args.version
+    version_cfg = SUMMARY_VERSIONS[version_label]
+    model = args.model or version_cfg["model"]
     if not model and not args.dry_run:
-        model = detect_lm_studio_model(args.lm_studio_url)
+        # Only auto-detect when URL looks like a local LM Studio endpoint.
+        if ":1234" in args.base_url:
+            model = detect_lm_studio_model(args.base_url)
+        else:
+            log.error("--model is required for non-LM-Studio endpoints")
+            return 1
+
+    # Load Jinja prompt templates for this version.
+    jinja_env: jinja2.Environment | None = None
+    try:
+        jinja_env = _load_prompt_templates(version_cfg["prompts"])
+        log.info(
+            "Loaded prompt templates from %s/%s",
+            PROMPTS_DIR, version_cfg["prompts"],
+        )
+    except FileNotFoundError:
+        log.warning(
+            "Prompt template dir %s/%s not found, using inline fallbacks",
+            PROMPTS_DIR, version_cfg["prompts"],
+        )
 
     llm: ChatOpenAI | None = None
     if not args.dry_run:
         llm = ChatOpenAI(
-            base_url=args.lm_studio_url,
-            api_key="lm-studio",
-            model=model or "local-model"
+            base_url=args.base_url,
+            api_key=args.api_key,
+            model=model or "local-model",
+        )
+        log.info(
+            "LLM: model=%s, base_url=%s, version=%s",
+            model, args.base_url, version_label,
         )
 
     sem = asyncio.Semaphore(args.jobs)
@@ -2510,6 +2756,8 @@ async def async_main(args: argparse.Namespace) -> int:
                 args.batch_size, checkpoint,
                 context_size=args.context_size,
                 dry_run=args.dry_run,
+                jinja_env=jinja_env,
+                version=version_label,
             )
 
         # ── Phase 2: Notebook summaries ──────────────────────────────
@@ -2521,6 +2769,8 @@ async def async_main(args: argparse.Namespace) -> int:
                 llm, model, cache, sem,
                 args.batch_size, checkpoint, args.dry_run,
                 context_size=args.context_size,
+                jinja_env=jinja_env,
+                version=version_label,
             )
 
         # ── Phase 3: Directory summaries ─────────────────────────────
@@ -2531,6 +2781,8 @@ async def async_main(args: argparse.Namespace) -> int:
                 llm, model, cache, sem,
                 args.batch_size, checkpoint, args.dry_run,
                 context_size=args.context_size,
+                jinja_env=jinja_env,
+                version=version_label,
             )
 
         # ── Dry-run report ───────────────────────────────────────────
