@@ -452,17 +452,19 @@ def _format_topic_section(source_file: str) -> str:
     """Format the topic context section for injection into prompts.
 
     Returns an empty string if no topic context is available.
+    NOTE: Currently disabled while tuning cell-level coverage.
     """
-    label, desc, focus = _get_topic_context(source_file)
-    if not label:
-        return ""
-
-    return (
-        f"\n--- Library Context ---\n"
-        f"Topic area: {label}\n"
-        f"{desc}\n"
-        f"{focus}\n"
-    )
+    return ""
+    # label, desc, focus = _get_topic_context(source_file)
+    # if not label:
+    #     return ""
+    #
+    # return (
+    #     f"\n--- Library Context ---\n"
+    #     f"Topic area: {label}\n"
+    #     f"{desc}\n"
+    #     f"{focus}\n"
+    # )
 
 
 # ─── Data classes ────────────────────────────────────────────────────
@@ -637,6 +639,16 @@ class LLMCache:
             self._conn.close()
             self._conn = None
 
+    def delete_matching(self, pattern: str) -> int:
+        """Delete cache entries whose prompt_text contains *pattern*."""
+        conn = self._connect()
+        cur = conn.execute(
+            "DELETE FROM llm_cache WHERE prompt_text LIKE ?",
+            (f"%{pattern}%",),
+        )
+        conn.commit()
+        return cur.rowcount
+
 
 # ─── LLM Studio auto-detect ─────────────────────────────────────────
 
@@ -662,36 +674,64 @@ def detect_lm_studio_model(base_url: str) -> str:
 # ─── Prompt templates ────────────────────────────────────────────────
 
 BATCH_CELL_PROMPT = """\
-/no_think
 You are an expert in ACL2 (A Computational Logic for Applicative Common Lisp) \
 and formal verification.  Below are cells from the notebook ``{source_file}``.
 {topic_section}
-For each substantive cell, call the appropriate tool(s):
-- report_what: describe what the cell does — be specific about what is defined, \
-proved, or configured (name the functions, theorems, macros, types, or rules)
-- report_why: explain the purpose — why this definition/theorem matters, what \
-problem it solves, or what proof obligation it discharges
-- report_how: provide usage guidance — how to call/invoke/apply what is defined, \
-what arguments it takes, or what theory to include (only if applicable)
+You MUST process EVERY cell.
 
-Use the cell_number argument to identify which cell you are annotating.
-Skip trivial cells (bare include-book, in-package, or very short boilerplate).
+For EACH cell:
 
-IMPORTANT: Each tool call should cover ONE distinct idea in 1-3 precise \
-sentences.  If a cell covers multiple distinct ideas (e.g. several unrelated \
-definitions, a mixture of type declarations and theorems, or a long comment \
-with separate topics), call report_what/report_why/report_how MULTIPLE TIMES \
-for that cell — once per idea.  Group the what/why/how calls for each idea \
-together before moving to the next idea.
+1. Identify ALL meaningful elements, including:
+   - Definitions (functions, theorems, macros, events)
+   - Comments with technical content
+   - Preconditions, postconditions, invariants
+   - Proof strategies or hints
+   - Imports / includes with semantic significance
+   - Configuration affecting semantics
+   - Design rationale statements
+   - Assumptions or constraints
+   - Usage instructions
+   - Warnings or limitations
 
-Use correct ACL2 terminology.  Name specific functions, macros, theorems, \
+2. Decompose the cell into ATOMIC IDEAS.
+   - An atomic idea is the smallest independently meaningful technical \
+claim, definition, or rationale.
+   - If a paragraph contains 3 claims, extract 3 ideas.
+   - If a function defines behavior and constraints, extract separate ideas.
+
+3. For EACH atomic idea:
+   - Call report_what
+   - Call report_why (if inferable)
+   - Call report_how (if mechanism/implementation exists)
+
+4. Do NOT merge unrelated ideas.
+5. Do NOT skip ideas.
+6. Do NOT summarize the whole cell as one idea unless it truly contains \
+only one.
+
+7. Only omit report_how if:
+   - The idea contains no implementation or mechanism detail.
+
+8. Every code cell with a definition or proof (i.e. a symbol) should yield at least 2 ideas (what+why, or what+how).
+
+Minimum expectation:
+- Any non-trivial function definition => at least 2 ideas
+- Any theorem with proof hints => at least 2 ideas
+- Any technical comment paragraph => 1 idea per technical claim
+- Any include/import => 1 idea explaining its purpose
+
+If you extract fewer than 2 ideas from a non-trivial cell, re-evaluate \
+and decompose further.
+
+Use the cell_number argument (0-based cell index) to identify each cell.
+Use correct ACL2 terminology — name specific functions, macros, theorems, \
 and rules rather than speaking generically.
+{progress_section}
 {continuation_section}
 --- Cells ---
 {cells_text}"""
 
 NOTEBOOK_CHUNK_PROMPT = """\
-/no_think
 You are summarizing a group of ACL2 notebook cells.  Below are individual \
 cell summaries from the same notebook file ``{source_file}``.
 {topic_section}
@@ -710,7 +750,6 @@ speaking generically about "various definitions".
 {cell_summaries}"""
 
 NOTEBOOK_REDUCE_PROMPT = """\
-/no_think
 You are summarizing an ACL2 notebook file ``{source_file}``.
 Below are intermediate summaries from different sections of this notebook.
 {topic_section}
@@ -728,7 +767,6 @@ Keep each to 2-4 sentences.  Be concrete and name specific things.
 {section_summaries}"""
 
 DIRECTORY_REDUCE_PROMPT = """\
-/no_think
 You are summarizing the ACL2 library directory ``{directory}``.
 Below are summaries of the notebooks and subdirectories it contains.
 {topic_section}
@@ -1117,6 +1155,18 @@ async def summarize_cells(
         nb_results: list[tuple[int, int, SummaryResult]] = []
         continuation_context = ""
 
+        # Compute notebook-wide cell counts by category for progress.
+        n_symbol_cells = sum(
+            1 for c in cells if c.symbol_names
+        )
+        n_code_cells = sum(
+            1 for c in cells if c.cell_type == "code" and not c.symbol_names
+        )
+        n_comment_cells = sum(
+            1 for c in cells if c.cell_type == "markdown"
+        )
+        summarized_cell_indices: set[int] = set()
+
         for batch_cells in batches:
             batch_key = (
                 f"{nb_src}:batch:"
@@ -1137,9 +1187,33 @@ async def summarize_cells(
                     + continuation_context + "\n"
                 )
 
+            # Build progress section showing coverage so far.
+            done_sym = sum(
+                1 for c in cells
+                if c.symbol_names and c.cell_index in summarized_cell_indices
+            )
+            done_code = sum(
+                1 for c in cells
+                if c.cell_type == "code" and not c.symbol_names
+                and c.cell_index in summarized_cell_indices
+            )
+            done_cmt = sum(
+                1 for c in cells
+                if c.cell_type == "markdown"
+                and c.cell_index in summarized_cell_indices
+            )
+            progress_section = (
+                f"\n--- Progress ---\n"
+                f"Cells with at least one summary: "
+                f"{done_sym} of {n_symbol_cells} cells with symbol definitions, "
+                f"{done_code} of {n_code_cells} code cells, "
+                f"{done_cmt} of {n_comment_cells} comment cells.\n"
+            )
+
             prompt = BATCH_CELL_PROMPT.format(
                 source_file=nb_src,
                 topic_section=_format_topic_section(nb_src),
+                progress_section=progress_section,
                 continuation_section=cont_section,
                 cells_text=cells_text,
             )
@@ -1155,6 +1229,9 @@ async def summarize_cells(
             summaries, continuation_context = _tool_calls_to_summaries(
                 tool_calls,
             )
+
+            # Track which cells received summaries for progress.
+            summarized_cell_indices.update(summaries.keys())
 
             # Merge into notebook results.
             for cell_idx, sum_list in summaries.items():
@@ -2017,6 +2094,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"LLM cache SQLite path (default: {DEFAULT_CACHE_PATH})",
     )
     p.add_argument(
+        "--overwrite", action="store_true",
+        help="Delete existing summaries, cache, and checkpoint for targeted notebooks before processing",
+    )
+    p.add_argument(
         "--restart", action="store_true",
         help="Clear checkpoint and start fresh",
     )
@@ -2055,8 +2136,7 @@ async def async_main(args: argparse.Namespace) -> int:
         llm = ChatOpenAI(
             base_url=args.lm_studio_url,
             api_key="lm-studio",
-            model=model or "local-model",
-            temperature=0.1,
+            model=model or "local-model"
         )
 
     sem = asyncio.Semaphore(args.jobs)
@@ -2128,6 +2208,56 @@ async def async_main(args: argparse.Namespace) -> int:
         if not notebook_sources:
             log.warning("No notebooks found, nothing to do")
             return 0
+
+        # ── Overwrite: clean existing data for targeted notebooks ─
+        if args.overwrite and not args.dry_run:
+            log.info("Overwrite mode: clearing data for %d notebooks",
+                     len(notebook_sources))
+            summary_coll = client.collections.get(COLLECTION_SUMMARY)
+            dirs_to_clear: set[str] = set()
+            total_deleted = 0
+            for nb_src in notebook_sources:
+                dirs_to_clear.add(str(Path(nb_src).parent))
+                # Delete Weaviate summaries for this notebook.
+                while True:
+                    result = summary_coll.query.fetch_objects(
+                        filters=Filter.by_property("source_file").equal(nb_src),
+                        limit=200, return_properties=["ref_key"])
+                    if not result.objects:
+                        break
+                    for obj in result.objects:
+                        summary_coll.data.delete_by_id(obj.uuid)
+                        total_deleted += 1
+                # Clear checkpoint entries for this notebook.
+                for key in ("cell_batches", "cells", "notebooks"):
+                    entries = checkpoint.get(key)
+                    if entries is not None:
+                        to_remove = [e for e in entries
+                                     if nb_src in e]
+                        for e in to_remove:
+                            entries.discard(e) if isinstance(entries, set) else None
+                            if isinstance(entries, list):
+                                entries.remove(e)
+            # Delete directory-scope summaries for affected dirs.
+            for d in dirs_to_clear:
+                while True:
+                    result = summary_coll.query.fetch_objects(
+                        filters=(Filter.by_property("scope").equal("directory")
+                                 & Filter.by_property("directory").equal(d)),
+                        limit=100, return_properties=["ref_key"])
+                    if not result.objects:
+                        break
+                    for obj in result.objects:
+                        summary_coll.data.delete_by_id(obj.uuid)
+                        total_deleted += 1
+                # Clear directory checkpoint entries.
+                dirs_cp = checkpoint.get("directories")
+                if dirs_cp is not None:
+                    dirs_cp.discard(d) if isinstance(dirs_cp, set) else None
+                    if isinstance(dirs_cp, list) and d in dirs_cp:
+                        dirs_cp.remove(d)
+            log.info("Overwrite: deleted %d Weaviate objects, cleared checkpoint",
+                     total_deleted)
 
         run_cell = args.scope in ("all", "cell")
         run_notebook = args.scope in ("all", "notebook")
