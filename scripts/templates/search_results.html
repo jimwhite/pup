@@ -17,14 +17,46 @@
 
     {% if r.type == 'symbol' %}
     <a href="{{ url_for('symbol_detail', qn=r.qn) }}"
-       class="list-group-item list-group-item-action d-flex justify-content-between align-items-start">
-      <div>
-        <span class="fw-bold font-monospace">{{ r.qn }}</span>
-        <span class="badge bg-{{ kind_color(r.kind) }} kind-badge ms-2">{{ r.kind }}</span>
+       class="list-group-item list-group-item-action">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <span class="fw-bold font-monospace">{{ r.qn }}</span>
+          <span class="badge bg-{{ kind_color(r.kind) }} kind-badge ms-2">{{ r.kind }}</span>
+        </div>
+        {% if r.distance is not none %}
+        <span class="distance">d={{ "%.3f"|format(r.distance) }}</span>
+        {% endif %}
       </div>
-      {% if r.distance is not none %}
-      <span class="distance">d={{ "%.3f"|format(r.distance) }}</span>
+      {% if r.summary_what %}
+      <div class="summary-box mt-1">
+        <span class="what-label">What:</span> {{ r.summary_what }}
+      </div>
       {% endif %}
+    </a>
+
+    {% elif r.type == 'summary' %}
+    <a href="{{ url_for('summary_detail', ref_key=r.ref_key) }}"
+       class="list-group-item list-group-item-action">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <span class="badge bg-info kind-badge">{{ r.scope }}</span>
+          {% if r.source_file %}
+          <span class="nb-path ms-1">{{ r.source_file }}</span>
+          {% endif %}
+          {% if r.cell_index >= 0 %}
+          · cell {{ r.cell_index }}
+          {% endif %}
+          {% if r.symbol_names %}
+          <span class="text-muted small ms-1">({{ r.symbol_names | join(', ') }})</span>
+          {% endif %}
+        </div>
+        {% if r.distance is not none %}
+        <span class="distance">d={{ "%.3f"|format(r.distance) }}</span>
+        {% endif %}
+      </div>
+      <div class="summary-box mt-1">
+        <span class="what-label">What:</span> {{ r.what }}
+      </div>
     </a>
 
     {% else %}{# code or comment cell #}
@@ -41,6 +73,11 @@
         {% endif %}
       </div>
       <pre class="mt-1 small" style="max-height:4.5rem; overflow:hidden;"><code class="language-lisp">{{ r.preview }}</code></pre>
+      {% if r.summary_what %}
+      <div class="summary-box mt-1">
+        <span class="what-label">What:</span> {{ r.summary_what }}
+      </div>
+      {% endif %}
     </a>
     {% endif %}
 

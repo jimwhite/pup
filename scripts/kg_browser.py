@@ -107,22 +107,43 @@ def search():
             resp = sym.query.near_text(
                 query=q, limit=limit, target_vector="symbol_vector",
                 return_metadata=MetadataQuery(distance=True),
+                return_references=[
+                    QueryReference(link_on="definedInCell",
+                                   return_properties=["cell_index", "notebook_source"]),
+                ],
             )
         else:
             resp = sym.query.fetch_objects(
                 filters=Filter.by_property("qualified_name").like(f"*{q}*"),
                 limit=limit,
+                return_references=[
+                    QueryReference(link_on="definedInCell",
+                                   return_properties=["cell_index", "notebook_source"]),
+                ],
             )
         for obj in resp.objects:
             dist = None
             if obj.metadata:
                 dist = getattr(obj.metadata, "distance", None)
+            # Get summary for the defining cell
+            summary_what = ""
+            cell_ref = obj.references.get("definedInCell")
+            if cell_ref and cell_ref.objects:
+                c = cell_ref.objects[0].properties
+                nb_src = c.get("notebook_source", "")
+                ci = c.get("cell_index", -1)
+                if nb_src and ci >= 0:
+                    sums = _get_cell_summaries(client, nb_src)
+                    s = sums.get(ci)
+                    if s:
+                        summary_what = s.get("what", "")
             results.append({
                 "type": "symbol",
                 "qn": obj.properties["qualified_name"],
                 "kind": obj.properties.get("kind", ""),
                 "package": obj.properties.get("package", ""),
                 "distance": dist,
+                "summary_what": summary_what,
             })
 
     elif target in ("code", "comment"):
@@ -145,14 +166,57 @@ def search():
             dist = None
             if obj.metadata:
                 dist = getattr(obj.metadata, "distance", None)
+            # Get cell summary
+            nb_src = obj.properties.get("notebook_source", "")
+            ci = obj.properties.get("cell_index", 0)
+            summary_what = ""
+            if nb_src:
+                sums = _get_cell_summaries(client, nb_src)
+                s = sums.get(ci)
+                if s:
+                    summary_what = s.get("what", "")
             results.append({
                 "type": target,
-                "notebook": obj.properties.get("notebook_source", ""),
-                "cell_index": obj.properties.get("cell_index", 0),
+                "notebook": nb_src,
+                "cell_index": ci,
                 "cell_type": obj.properties.get("cell_type", ""),
                 "preview": text[:300],
                 "distance": dist,
+                "summary_what": summary_what,
             })
+
+    elif target == "summary":
+        try:
+            col = client.collections.get("ACL2Summary")
+        except Exception:
+            col = None
+        if col:
+            if mode == "semantic":
+                resp = col.query.near_text(
+                    query=q, limit=limit, target_vector="what_vector",
+                    return_metadata=MetadataQuery(distance=True),
+                )
+            else:
+                resp = col.query.fetch_objects(
+                    filters=Filter.by_property("what_summary").like(f"*{q}*"),
+                    limit=limit,
+                )
+            for obj in resp.objects:
+                p = obj.properties
+                dist = None
+                if obj.metadata:
+                    dist = getattr(obj.metadata, "distance", None)
+                results.append({
+                    "type": "summary",
+                    "scope": p.get("scope", ""),
+                    "ref_key": p.get("ref_key", ""),
+                    "what": p.get("what_summary", ""),
+                    "why": p.get("why_summary", ""),
+                    "source_file": p.get("source_file", ""),
+                    "cell_index": p.get("cell_index", -1),
+                    "symbol_names": p.get("symbol_names", []),
+                    "distance": dist,
+                })
 
     return render_template("search_results.html",
                            q=q, target=target, mode=mode,
@@ -327,7 +391,16 @@ def notebook_list():
         key=lambda x: x["source_file"],
     )
 
-    return render_template("notebooks.html", notebooks=notebooks, q=q)
+    # Fetch notebook summaries
+    nb_summaries = {}
+    for nb in notebooks:
+        sf = nb["source_file"]
+        s = _get_notebook_summary(client, sf)
+        if s and s.get("what"):
+            nb_summaries[sf] = s["what"]
+
+    return render_template("notebooks.html", notebooks=notebooks, q=q,
+                           nb_summaries=nb_summaries)
 
 
 # ── Summary routes ───────────────────────────────────────────────────

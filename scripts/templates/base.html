@@ -50,6 +50,7 @@
           <option value="symbol"  {%- if request.args.get('target','symbol')=='symbol' %} selected{% endif %}>Symbols</option>
           <option value="code"    {%- if request.args.get('target')=='code' %} selected{% endif %}>Code</option>
           <option value="comment" {%- if request.args.get('target')=='comment' %} selected{% endif %}>Comments</option>
+          <option value="summary" {%- if request.args.get('target')=='summary' %} selected{% endif %}>Summaries</option>
         </select>
         <select class="form-select me-2" name="mode">
           <option value="semantic" {%- if request.args.get('mode','semantic')=='semantic' %} selected{% endif %}>Semantic</option>
