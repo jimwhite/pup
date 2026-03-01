@@ -55,6 +55,7 @@
         {% if r.scope == 'cell' %}
           <a href="{{ url_for('notebook_view', source_file=r.source_file, cell=r.cell_index) }}"
              class="nb-path text-decoration-none">{{ r.source_file }} · cell {{ r.cell_index }}</a>
+          {% if r.summary_index > 0 %}<span class="badge bg-secondary ms-1" style="font-size:.65em">idea {{ r.summary_index + 1 }}</span>{% endif %}
         {% elif r.scope == 'notebook' %}
           <a href="{{ url_for('notebook_view', source_file=r.source_file) }}"
              class="nb-path text-decoration-none">{{ r.source_file }}</a>

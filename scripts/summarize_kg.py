@@ -501,7 +501,8 @@ class ReportWhat(BaseModel):
 
     cell_number: int = Field(description="The 0-based cell index")
     summary: str = Field(
-        description="Concise description of what the cell does (1-3 sentences)"
+        description="What this cell defines, proves, or configures.  "
+        "1-3 precise sentences covering one distinct idea."
     )
 
 
@@ -509,7 +510,10 @@ class ReportWhy(BaseModel):
     """Report the purpose or goal of a notebook cell."""
 
     cell_number: int = Field(description="The 0-based cell index")
-    summary: str = Field(description="The purpose or goal (1-3 sentences)")
+    summary: str = Field(
+        description="Why this matters — the goal, problem solved, or proof "
+        "obligation discharged.  1-3 sentences for one distinct idea."
+    )
 
 
 class ReportHow(BaseModel):
@@ -517,7 +521,8 @@ class ReportHow(BaseModel):
 
     cell_number: int = Field(description="The 0-based cell index")
     summary: str = Field(
-        description="Brief usage instructions (1-3 sentences)"
+        description="Usage instructions — how to call/invoke/include.  "
+        "1-3 sentences for one distinct idea."
     )
 
 
@@ -536,7 +541,8 @@ class SummaryWhat(BaseModel):
     """Report what a notebook or directory provides — its overall functionality."""
 
     summary: str = Field(
-        description="Concise description of overall functionality (2-4 sentences)"
+        description="Description of overall functionality.  2-4 sentences.  "
+        "Start with the single most important capability."
     )
 
 
@@ -544,7 +550,8 @@ class SummaryWhy(BaseModel):
     """Report the purpose or goal of a notebook or directory."""
 
     summary: str = Field(
-        description="The broader purpose or goal (2-4 sentences)"
+        description="The broader purpose or goal.  2-4 sentences.  "
+        "Start with the primary purpose."
     )
 
 
@@ -552,7 +559,8 @@ class SummaryHow(BaseModel):
     """Report usage instructions for a notebook or directory."""
 
     summary: str = Field(
-        description="Usage instructions — include-book path, key functions/macros (2-4 sentences)"
+        description="Usage instructions — include-book path, key functions/macros, "
+        "and typical invocation patterns.  2-4 sentences."
     )
 
 
@@ -668,8 +676,16 @@ what arguments it takes, or what theory to include (only if applicable)
 
 Use the cell_number argument to identify which cell you are annotating.
 Skip trivial cells (bare include-book, in-package, or very short boilerplate).
-Keep each summary to 1-3 precise sentences using correct ACL2 terminology.
-Name specific functions, macros, theorems, and rules rather than speaking generically.
+
+IMPORTANT: Each tool call should cover ONE distinct idea in 1-3 precise \
+sentences.  If a cell covers multiple distinct ideas (e.g. several unrelated \
+definitions, a mixture of type declarations and theorems, or a long comment \
+with separate topics), call report_what/report_why/report_how MULTIPLE TIMES \
+for that cell — once per idea.  Group the what/why/how calls for each idea \
+together before moving to the next idea.
+
+Use correct ACL2 terminology.  Name specific functions, macros, theorems, \
+and rules rather than speaking generically.
 {continuation_section}
 --- Cells ---
 {cells_text}"""
@@ -966,9 +982,18 @@ async def _cached_tool_call(
 
 def _tool_calls_to_summaries(
     tool_calls: list[dict],
-) -> tuple[dict[int, SummaryResult], str]:
-    """Parse tool-call dicts into per-cell SummaryResults and continuation context."""
-    summaries: dict[int, SummaryResult] = {}
+) -> tuple[dict[int, list[SummaryResult]], str]:
+    """Parse tool-call dicts into per-cell lists of SummaryResults.
+
+    The LLM may call report_what/report_why/report_how multiple times
+    for the same cell to cover distinct ideas.  A new ``ReportWhat``
+    for a cell that already has a non-empty ``what`` starts a fresh
+    SummaryResult (ordering-based grouping).
+
+    Returns ``(summaries, continuation)`` where *summaries* maps
+    each cell index to a list of SummaryResult objects.
+    """
+    summaries: dict[int, list[SummaryResult]] = {}
     continuation = ""
 
     for tc in tool_calls:
@@ -983,16 +1008,29 @@ def _tool_calls_to_summaries(
         if cell_num is None:
             continue
 
-        if cell_num not in summaries:
-            summaries[cell_num] = SummaryResult()
-
         text = args.get("summary", "")
+
+        if cell_num not in summaries:
+            summaries[cell_num] = [SummaryResult()]
+
+        current = summaries[cell_num][-1]
+
         if name == "ReportWhat":
-            summaries[cell_num].what = text
+            # A new ReportWhat when we already have one → new idea.
+            if current.what:
+                summaries[cell_num].append(SummaryResult())
+                current = summaries[cell_num][-1]
+            current.what = text
         elif name == "ReportWhy":
-            summaries[cell_num].why = text
+            if current.why:
+                summaries[cell_num].append(SummaryResult())
+                current = summaries[cell_num][-1]
+            current.why = text
         elif name == "ReportHow":
-            summaries[cell_num].how = text
+            if current.how:
+                summaries[cell_num].append(SummaryResult())
+                current = summaries[cell_num][-1]
+            current.how = text
 
     return summaries, continuation
 
@@ -1008,13 +1046,17 @@ async def summarize_cells(
     checkpoint: dict,
     context_size: int = DEFAULT_CONTEXT_SIZE,
     dry_run: bool = False,
-) -> dict[str, list[tuple[int, SummaryResult]]]:
+) -> dict[str, list[tuple[int, int, SummaryResult]]]:
     """Phase 1: Generate cell-level summaries via batched tool calling.
 
     Cells are grouped into batches that fit within *context_size* bytes.
     The LLM receives each batch and calls report_what / report_why /
     report_how tools for substantive cells.  A continuation context is
     passed between batches within the same notebook.
+
+    Returns a dict mapping notebook source to a list of
+    ``(cell_index, summary_index, SummaryResult)`` tuples.  A cell may
+    have multiple summaries (one per distinct idea the LLM identified).
     """
     llm_with_tools = llm.bind_tools(CELL_TOOLS) if llm else None
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -1024,7 +1066,7 @@ async def summarize_cells(
     total_skipped_cp = 0
     total_cached = 0
     total_llm = 0
-    all_results: dict[str, list[tuple[int, SummaryResult]]] = {}
+    all_results: dict[str, list[tuple[int, int, SummaryResult]]] = {}
 
     # Build a set of notebook sources whose ALL cells are already done.
     # We can skip fetching cells entirely for these.
@@ -1052,7 +1094,7 @@ async def summarize_cells(
 
         if dry_run:
             all_results[nb_src] = [
-                (c.cell_index, SummaryResult()) for c in cells
+                (c.cell_index, 0, SummaryResult()) for c in cells
             ]
             continue
 
@@ -1060,7 +1102,7 @@ async def summarize_cells(
         batches = _batch_cells_by_size(cells, context_size)
         total_batches += len(batches)
 
-        nb_results: list[tuple[int, SummaryResult]] = []
+        nb_results: list[tuple[int, int, SummaryResult]] = []
         continuation_context = ""
 
         for batch_cells in batches:
@@ -1103,46 +1145,49 @@ async def summarize_cells(
             )
 
             # Merge into notebook results.
-            for cell_idx, summary in summaries.items():
-                nb_results.append((cell_idx, summary))
+            for cell_idx, sum_list in summaries.items():
+                for si, summary in enumerate(sum_list):
+                    nb_results.append((cell_idx, si, summary))
 
             # Upsert to Weaviate.
             if summary_coll is not None and summaries:
                 upsert_items: list[dict] = []
-                for cell_idx, summary in summaries.items():
-                    ref_key = f"{nb_src}:{cell_idx}"
-                    uuid = str(generate_uuid5(f"summary:cell:{ref_key}"))
-                    nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))
-                    cell_uuid = str(
-                        generate_uuid5(f"cell:{nb_src}:{cell_idx}")
-                    )
+                for cell_idx, sum_list in summaries.items():
                     cell_rec = next(
                         (c for c in batch_cells if c.cell_index == cell_idx),
                         None,
                     )
-                    upsert_items.append({
-                        "uuid": uuid,
-                        "properties": {
-                            "scope": "cell",
-                            "ref_key": ref_key,
-                            "what_summary": summary.what or "",
-                            "why_summary": summary.why or "",
-                            "how_summary": summary.how or "",
-                            "source_file": nb_src,
-                            "cell_index": cell_idx,
-                            "directory": str(Path(nb_src).parent),
-                            "symbol_names": (
-                                cell_rec.symbol_names if cell_rec else []
-                            ),
-                        },
-                        "references": {
-                            "sourceNotebook": nb_uuid,
-                            "sourceCell": cell_uuid,
-                        },
-                    })
+                    nb_uuid = str(generate_uuid5(f"notebook:{nb_src}"))
+                    cell_uuid = str(
+                        generate_uuid5(f"cell:{nb_src}:{cell_idx}")
+                    )
+                    for si, summary in enumerate(sum_list):
+                        ref_key = f"{nb_src}:{cell_idx}:{si}"
+                        uuid = str(generate_uuid5(f"summary:cell:{ref_key}"))
+                        upsert_items.append({
+                            "uuid": uuid,
+                            "properties": {
+                                "scope": "cell",
+                                "ref_key": ref_key,
+                                "what_summary": summary.what or "",
+                                "why_summary": summary.why or "",
+                                "how_summary": summary.how or "",
+                                "source_file": nb_src,
+                                "cell_index": cell_idx,
+                                "summary_index": si,
+                                "directory": str(Path(nb_src).parent),
+                                "symbol_names": (
+                                    cell_rec.symbol_names if cell_rec else []
+                                ),
+                            },
+                            "references": {
+                                "sourceNotebook": nb_uuid,
+                                "sourceCell": cell_uuid,
+                            },
+                        })
 
-                    # Mark cell in checkpoint (Phase 2 compatibility).
-                    checkpoint.setdefault("cells", set()).add(ref_key)
+                        # Mark cell in checkpoint (Phase 2 compatibility).
+                        checkpoint.setdefault("cells", set()).add(ref_key)
 
                 with summary_coll.batch.fixed_size(
                     batch_size=batch_size,
@@ -1185,7 +1230,7 @@ async def summarize_cells(
 async def summarize_notebooks(
     client: weaviate.WeaviateClient,
     notebook_sources: list[str],
-    cell_summaries: dict[str, list[tuple[int, SummaryResult]]],
+    cell_summaries: dict[str, list[tuple[int, int, SummaryResult]]],
     llm: ChatOpenAI,
     model: str,
     cache: LLMCache | None,
@@ -1218,7 +1263,7 @@ async def summarize_notebooks(
             cell_sums = _load_cell_summaries_from_weaviate(client, nb_src)
 
         # Filter out empty summaries.
-        non_empty = [(idx, s) for idx, s in cell_sums if s.what or s.why or s.how]
+        non_empty = [(idx, si, s) for idx, si, s in cell_sums if s.what or s.why or s.how]
 
         if not non_empty:
             log.debug("No cell summaries for %s, skipping notebook summary", nb_src)
@@ -1254,12 +1299,12 @@ async def summarize_notebooks(
             # If reduce text is too large, do hierarchical reduction.
             if len(section_text.encode("utf-8")) > context_size - 400:
                 # Re-chunk and reduce iteratively.
-                int_pairs = [(i, s) for i, s in enumerate(intermediates)]
+                int_pairs = [(i, 0, s) for i, s in enumerate(intermediates)]
                 reduce_chunks = _chunk_summaries_by_size(
                     int_pairs, context_size, prompt_overhead=400)
                 new_intermediates: list[SummaryResult] = []
                 for rc in reduce_chunks:
-                    rc_sums = [s for _, s in rc]
+                    rc_sums = [s for _, _, s in rc]
                     rc_text = _format_intermediates(rc_sums)
                     prompt = NOTEBOOK_REDUCE_PROMPT.format(
                         source_file=nb_src,
@@ -1322,10 +1367,10 @@ async def summarize_notebooks(
 def _load_cell_summaries_from_weaviate(
     client: weaviate.WeaviateClient,
     notebook_source: str,
-) -> list[tuple[int, SummaryResult]]:
+) -> list[tuple[int, int, SummaryResult]]:
     """Load previously stored cell summaries from Weaviate."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY)
-    results: list[tuple[int, SummaryResult]] = []
+    results: list[tuple[int, int, SummaryResult]] = []
 
     response = summary_coll.query.fetch_objects(
         filters=(
@@ -1333,7 +1378,8 @@ def _load_cell_summaries_from_weaviate(
             & Filter.by_property("source_file").equal(notebook_source)
         ),
         limit=10000,
-        return_properties=["cell_index", "what_summary", "why_summary", "how_summary"],
+        return_properties=["cell_index", "summary_index",
+                           "what_summary", "why_summary", "how_summary"],
     )
 
     for obj in response.objects:
@@ -1343,6 +1389,7 @@ def _load_cell_summaries_from_weaviate(
             continue
         results.append((
             p.get("cell_index", 0),
+            p.get("summary_index", 0) or 0,
             SummaryResult(
                 what=p.get("what_summary", ""),
                 why=p.get("why_summary", ""),
@@ -1350,7 +1397,7 @@ def _load_cell_summaries_from_weaviate(
             ),
         ))
 
-    results.sort(key=lambda x: x[0])
+    results.sort(key=lambda x: (x[0], x[1]))
     return results
 
 
@@ -1360,22 +1407,22 @@ def _chunk_list(items: list, size: int) -> list[list]:
 
 
 def _chunk_summaries_by_size(
-    items: list[tuple[int, SummaryResult]],
+    items: list[tuple[int, int, SummaryResult]],
     max_bytes: int,
     prompt_overhead: int = 400,
-) -> list[list[tuple[int, SummaryResult]]]:
+) -> list[list[tuple[int, int, SummaryResult]]]:
     """Split cell summaries into chunks that fit within *max_bytes*.
 
     Each chunk's formatted text plus *prompt_overhead* (for the prompt
     template) stays under the limit.
     """
     limit = max_bytes - prompt_overhead
-    batches: list[list[tuple[int, SummaryResult]]] = []
-    current: list[tuple[int, SummaryResult]] = []
+    batches: list[list[tuple[int, int, SummaryResult]]] = []
+    current: list[tuple[int, int, SummaryResult]] = []
     current_size = 0
 
-    for idx, s in items:
-        entry_size = 20  # "Cell N:\n"
+    for idx, si, s in items:
+        entry_size = 20  # "Cell N:"
         if s.what:
             entry_size += len(s.what.encode("utf-8")) + 10
         if s.why:
@@ -1386,7 +1433,7 @@ def _chunk_summaries_by_size(
             batches.append(current)
             current = []
             current_size = 0
-        current.append((idx, s))
+        current.append((idx, si, s))
         current_size += entry_size
 
     if current:
@@ -1419,11 +1466,12 @@ def _chunk_text_parts_by_size(
     return batches
 
 
-def _format_cell_summaries(cells: list[tuple[int, SummaryResult]]) -> str:
+def _format_cell_summaries(cells: list[tuple[int, int, SummaryResult]]) -> str:
     """Format cell summaries into a text block for the notebook prompt."""
     parts = []
-    for idx, s in cells:
-        entry = f"Cell {idx}:"
+    for idx, si, s in cells:
+        label = f"Cell {idx}" if si == 0 else f"Cell {idx} (idea {si + 1})"
+        entry = f"{label}:"
         if s.what:
             entry += f"\n  what: {s.what}"
         if s.why:
@@ -1650,6 +1698,8 @@ def ensure_summary_collection(
 
     if client.collections.exists(COLLECTION_SUMMARY):
         log.info("Collection %s already exists, skipping creation", COLLECTION_SUMMARY)
+        # Ensure summary_index property exists (added in multi-summary update).
+        _ensure_summary_index_property(client)
         return
 
     log.info("Creating collection %s", COLLECTION_SUMMARY)
@@ -1693,6 +1743,9 @@ def ensure_summary_collection(
                      description="Parent notebook path"),
             Property(name="cell_index", data_type=DataType.INT,
                      description="Cell index (-1 for non-cell scopes)"),
+            Property(name="summary_index", data_type=DataType.INT,
+                     skip_vectorization=True,
+                     description="Summary index within cell (0-based, for multi-summary)"),
             Property(name="directory", data_type=DataType.TEXT,
                      skip_vectorization=True,
                      description="Containing directory path"),
@@ -1711,6 +1764,87 @@ def ensure_summary_collection(
             ),
         ],
     )
+
+
+def _ensure_summary_index_property(client: weaviate.WeaviateClient) -> None:
+    """Add ``summary_index`` property if it doesn't exist yet."""
+    coll = client.collections.get(COLLECTION_SUMMARY)
+    schema = coll.config.get()
+    existing_names = {p.name for p in schema.properties}
+    if "summary_index" not in existing_names:
+        log.info("Adding summary_index property to %s", COLLECTION_SUMMARY)
+        coll.config.add_property(
+            Property(
+                name="summary_index",
+                data_type=DataType.INT,
+                skip_vectorization=True,
+                description="Summary index within cell (0-based, for multi-summary)",
+            )
+        )
+
+
+def migrate_summary_index(client: weaviate.WeaviateClient) -> int:
+    """Migrate existing cell summaries to include ``summary_index``.
+
+    For each scope="cell" object:
+    - Sets ``summary_index`` to 0 if missing/null.
+    - Rewrites ``ref_key`` from ``"nb:idx"`` to ``"nb:idx:0"``.
+
+    Returns the number of objects migrated.
+    """
+    _ensure_summary_index_property(client)
+    coll = client.collections.get(COLLECTION_SUMMARY)
+
+    # Fetch all cell-scope objects.
+    migrated = 0
+    batch_updates: list[tuple[str, dict]] = []
+
+    for obj in coll.iterator(
+        include_vector=False,
+        return_properties=["scope", "ref_key", "summary_index"],
+    ):
+        p = obj.properties
+        if p.get("scope") != "cell":
+            continue
+
+        si = p.get("summary_index")
+        ref_key = p.get("ref_key", "")
+
+        needs_update = False
+        new_props: dict = {}
+
+        if si is None:
+            new_props["summary_index"] = 0
+            needs_update = True
+
+        # Rewrite ref_key: "books/foo.lisp:5" → "books/foo.lisp:5:0"
+        # Only if it has exactly 2 colon-delimited segments at the end.
+        if ref_key:
+            # ref_key format: "path/file.lisp:cell_idx" or "path/file.lisp:cell_idx:si"
+            # Split from the right to handle paths with colons.
+            parts = ref_key.rsplit(":", 2)
+            if len(parts) == 2:
+                # Old format: "nb_src:cell_idx" — needs ":0" appended.
+                new_props["ref_key"] = f"{ref_key}:0"
+                needs_update = True
+
+        if needs_update:
+            batch_updates.append((str(obj.uuid), new_props))
+
+    if not batch_updates:
+        log.info("No cell summaries need migration")
+        return 0
+
+    log.info("Migrating %d cell summaries to add summary_index...", len(batch_updates))
+    for uuid_str, props in batch_updates:
+        coll.data.update(
+            uuid=uuid_str,
+            properties=props,
+        )
+        migrated += 1
+
+    log.info("Migration complete: %d objects updated", migrated)
+    return migrated
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────
@@ -1748,7 +1882,7 @@ def _save_checkpoint(path: str, data: dict) -> None:
 
 def _dry_run_report(
     notebook_sources: list[str],
-    cell_summaries: dict[str, list[tuple[int, SummaryResult]]],
+    cell_summaries: dict[str, list[tuple[int, int, SummaryResult]]],
 ) -> None:
     """Print a summary of what would be processed."""
     total_cells = sum(len(v) for v in cell_summaries.values())
@@ -1847,6 +1981,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drop and recreate ACL2Summary collection",
     )
     p.add_argument(
+        "--migrate", action="store_true",
+        help="Migrate existing cell summaries to add summary_index (run once)",
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="Report counts without calling the LLM",
     )
@@ -1940,6 +2078,12 @@ async def async_main(args: argparse.Namespace) -> int:
             recreate=args.recreate,
         )
 
+        # ── Migration ────────────────────────────────────────────────
+        if args.migrate:
+            migrated = migrate_summary_index(client)
+            log.info("Migration complete: %d objects updated", migrated)
+            return 0
+
         # ── Discover notebooks ───────────────────────────────────────
         effective_dir = _normalize_source_dir(args.source_dir)
         display_dir = "(root)" if effective_dir == _ROOT_SENTINEL else (effective_dir or "(all)")
@@ -1962,7 +2106,7 @@ async def async_main(args: argparse.Namespace) -> int:
         run_directory = args.scope in ("all", "directory")
 
         # ── Phase 1: Cell summaries ──────────────────────────────────
-        cell_summaries: dict[str, list[tuple[int, SummaryResult]]] = {}
+        cell_summaries: dict[str, list[tuple[int, int, SummaryResult]]] = {}
         if run_cell:
             log.info("=== Phase 1: Cell Summaries ===")
             cell_summaries = await summarize_cells(

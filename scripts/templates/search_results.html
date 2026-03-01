@@ -45,6 +45,9 @@
           {% endif %}
           {% if r.cell_index >= 0 %}
           · cell {{ r.cell_index }}
+          {% if r.summary_index is defined and r.summary_index > 0 %}
+          <span class="badge bg-secondary ms-1" style="font-size:.65em">idea {{ r.summary_index + 1 }}</span>
+          {% endif %}
           {% endif %}
           {% if r.symbol_names %}
           <span class="text-muted small ms-1">({{ r.symbol_names | join(', ') }})</span>

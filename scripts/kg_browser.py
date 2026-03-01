@@ -134,9 +134,9 @@ def search():
                 ci = c.get("cell_index", -1)
                 if nb_src and ci >= 0:
                     sums = _get_cell_summaries(client, nb_src)
-                    s = sums.get(ci)
-                    if s:
-                        summary_what = s.get("what", "")
+                    sl = sums.get(ci, [])
+                    if sl:
+                        summary_what = sl[0].get("what", "")
             results.append({
                 "type": "symbol",
                 "qn": obj.properties["qualified_name"],
@@ -172,9 +172,9 @@ def search():
             summary_what = ""
             if nb_src:
                 sums = _get_cell_summaries(client, nb_src)
-                s = sums.get(ci)
-                if s:
-                    summary_what = s.get("what", "")
+                sl = sums.get(ci, [])
+                if sl:
+                    summary_what = sl[0].get("what", "")
             results.append({
                 "type": target,
                 "notebook": nb_src,
@@ -214,6 +214,7 @@ def search():
                     "why": p.get("why_summary", ""),
                     "source_file": p.get("source_file", ""),
                     "cell_index": p.get("cell_index", -1),
+                    "summary_index": p.get("summary_index", 0),
                     "symbol_names": p.get("symbol_names", []),
                     "distance": dist,
                 })
@@ -290,17 +291,17 @@ def symbol_detail():
     except Exception:
         pass  # Reference filters may not be supported in all versions
 
-    # Cell summary for the defining cell
-    cell_summary = None
+    # Cell summaries for the defining cell
+    cell_summaries = []
     if defining_cell:
         sums = _get_cell_summaries(client, defining_cell["notebook"])
-        cell_summary = sums.get(defining_cell["cell_index"])
+        cell_summaries = sums.get(defining_cell["cell_index"], [])
 
     return render_template("symbol.html",
                            symbol=symbol, deps=deps,
                            defining_cell=defining_cell,
                            reverse_deps=reverse_deps,
-                           cell_summary=cell_summary)
+                           cell_summaries=cell_summaries)
 
 
 @app.route("/notebook/<path:source_file>")
@@ -442,6 +443,7 @@ def summaries():
                 "how": p.get("how_summary", ""),
                 "source_file": p.get("source_file", ""),
                 "cell_index": p.get("cell_index", -1),
+                "summary_index": p.get("summary_index", 0),
                 "directory": p.get("directory", ""),
                 "symbol_names": p.get("symbol_names", []),
                 "distance": dist,
@@ -463,6 +465,7 @@ def summaries():
                 "how": p.get("how_summary", ""),
                 "source_file": p.get("source_file", ""),
                 "cell_index": p.get("cell_index", -1),
+                "summary_index": p.get("summary_index", 0),
                 "directory": p.get("directory", ""),
                 "symbol_names": p.get("symbol_names", []),
                 "distance": None,
@@ -499,6 +502,7 @@ def summary_detail(ref_key):
         "how": p.get("how_summary", ""),
         "source_file": p.get("source_file", ""),
         "cell_index": p.get("cell_index", -1),
+        "summary_index": p.get("summary_index", 0),
         "directory": p.get("directory", ""),
         "symbol_names": p.get("symbol_names", []),
     }
@@ -507,7 +511,12 @@ def summary_detail(ref_key):
 
 
 def _get_cell_summaries(client, source_file):
-    """Fetch all cell-level summaries for a notebook, as a dict keyed by cell_index."""
+    """Fetch all cell-level summaries for a notebook.
+
+    Returns ``dict[int, list[dict]]`` — a list of summary dicts per
+    cell_index, sorted by ``summary_index``.  Each dict contains
+    ``what``, ``why``, ``how``, and ``summary_index``.
+    """
     try:
         col = client.collections.get("ACL2Summary")
     except Exception:
@@ -521,18 +530,22 @@ def _get_cell_summaries(client, source_file):
         limit=10000,
     )
 
-    sums = {}
+    sums: dict[int, list[dict]] = {}
     for obj in resp.objects:
         p = obj.properties
         if p.get("source_file") != source_file:
             continue
         idx = p.get("cell_index", -1)
         if idx >= 0:
-            sums[idx] = {
+            sums.setdefault(idx, []).append({
                 "what": p.get("what_summary", ""),
                 "why": p.get("why_summary", ""),
                 "how": p.get("how_summary", ""),
-            }
+                "summary_index": p.get("summary_index", 0),
+            })
+    # Sort each cell's summaries by summary_index
+    for lst in sums.values():
+        lst.sort(key=lambda s: s["summary_index"])
     return sums
 
 

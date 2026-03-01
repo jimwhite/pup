@@ -29,12 +29,15 @@
     <span class="nb-path">{{ defining_cell.notebook }}</span> · cell {{ defining_cell.cell_index }}
   </a>
 </p>
-{% if cell_summary %}
+{% if cell_summaries %}
+{% for cs in cell_summaries %}
 <div class="summary-box mb-2">
-  {% if cell_summary.what %}<span class="what-label">What:</span> {{ cell_summary.what }}<br>{% endif %}
-  {% if cell_summary.why %}<span class="why-label">Why:</span> {{ cell_summary.why }}<br>{% endif %}
-  {% if cell_summary.how %}<span class="how-label">How:</span> {{ cell_summary.how }}{% endif %}
+  {% if cell_summaries|length > 1 %}<span class="badge bg-secondary me-1" style="font-size:.65em">{{ loop.index }}/{{ cell_summaries|length }}</span>{% endif %}
+  {% if cs.what %}<span class="what-label">What:</span> {{ cs.what }}<br>{% endif %}
+  {% if cs.why %}<span class="why-label">Why:</span> {{ cs.why }}<br>{% endif %}
+  {% if cs.how %}<span class="how-label">How:</span> {{ cs.how }}{% endif %}
 </div>
+{% endfor %}
 {% endif %}
 {% if defining_cell.code %}
 <pre><code class="language-lisp">{{ defining_cell.code }}</code></pre>
