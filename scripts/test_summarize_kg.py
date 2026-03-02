@@ -1214,7 +1214,7 @@ class TestBuildWorkerArgv:
             base_url="http://host.docker.internal:1234/v1",
             api_key="lm-studio",
             model=None,
-            cache_path="scripts/.llm_cache.sqlite",
+            cache_path="cache/llm_cache.sqlite",
             no_cache=False,
             restart=False,
             verbose=False,

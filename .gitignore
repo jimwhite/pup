@@ -12,6 +12,8 @@ scripts/*-log*.txt
 scripts/summarize_groq_*.txt
 .vscode/alive/
 test2.lisp
+cache/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

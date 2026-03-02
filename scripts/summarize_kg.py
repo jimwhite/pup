@@ -78,9 +78,9 @@ DEFAULT_EMBED_MODEL = "nomic-embed-text:latest"
 DEFAULT_LM_STUDIO_URL = "http://host.docker.internal:1234/v1"
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_JOBS = 4
-DEFAULT_CACHE_PATH = "scripts/.llm_cache.sqlite"
-RECOVERY_FILE = "scripts/.salvage_recovery.jsonl"
-CHECKPOINT_FILE = "scripts/.summarize_checkpoint.json"
+DEFAULT_CACHE_PATH = "cache/llm_cache.sqlite"
+RECOVERY_FILE = "cache/salvage_recovery.jsonl"
+CHECKPOINT_FILE = "cache/summarize_checkpoint.json"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 # Maximum cell summaries per notebook chunk in the map step.
@@ -753,6 +753,7 @@ def _save_recovery_record(
         "response": response,
     }
     try:
+        Path(RECOVERY_FILE).parent.mkdir(parents=True, exist_ok=True)
         with open(RECOVERY_FILE, "a") as f:
             f.write(json.dumps(record) + "\n")
         log.info(
@@ -3309,9 +3310,12 @@ def sync_main(args: argparse.Namespace) -> int:
                 def _run_one(directory: str) -> tuple[str, int]:
                     san = _sanitize_for_filename(directory)
                     worker_chk = f"{chk_stem}_worker_{san}.json"
+                    log_path = Path("logs") / f"worker_{san}.log"
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
                     argv = _build_worker_argv(args, directory, worker_chk)
-                    log.info("Worker start: %s", directory)
-                    proc = subprocess.run(argv)
+                    log.info("Worker start: %s  (log: %s)", directory, log_path)
+                    with open(log_path, "w") as lf:
+                        proc = subprocess.run(argv, stdout=lf, stderr=subprocess.STDOUT)
                     return directory, proc.returncode
 
                 with concurrent.futures.ThreadPoolExecutor(
