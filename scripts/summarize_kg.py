@@ -56,8 +56,9 @@ from weaviate.util import generate_uuid5
 from typing import Callable
 
 from langchain_openai import ChatOpenAI
+from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from openai import BadRequestError, LengthFinishReasonError
+from openai import LengthFinishReasonError, OpenAIError
 from pydantic import BaseModel, Field
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -97,6 +98,8 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "model": "qwen/qwen3-coder-next",
         "prompts": "v1",
         "mode": "tools",
+        "base_url": DEFAULT_LM_STUDIO_URL,
+        "api_key_env": None,          # uses default "lm-studio" dummy key
         "description": "Initial LM Studio run with qwen3-coder-next",
     },
     "v2-groq-gpt-oss": {
@@ -104,6 +107,8 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "prompts": "v3",
         "mode": "json_schema",
         "max_tokens": 16384,
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
         "description": "Groq API with gpt-oss-120b, structured JSON output",
     },
     "v3-groq-gpt-oss-20b": {
@@ -111,6 +116,8 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "prompts": "v3",
         "mode": "json_schema",
         "max_tokens": 16384,
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
         "description": "Groq API with gpt-oss-20b, structured JSON output",
     },
 }
@@ -1353,7 +1360,9 @@ async def _cached_json_call(
               len(prompt), prompt_preview)
 
     max_retries = 3
+    response = None
     for attempt in range(1, max_retries + 1):
+        should_retry = False
         async with sem:
             t0 = time.monotonic()
             try:
@@ -1377,22 +1386,45 @@ async def _cached_json_call(
                     elapsed, usage_info,
                 )
                 raise
-            except BadRequestError as exc:
+            except OutputParserException as exc:
+                elapsed = time.monotonic() - t0
+                if attempt < max_retries:
+                    log.warning(
+                        "<<< LangChain structured parse failed "
+                        "(attempt %d/%d, %.1fs) — retrying. Error: %s",
+                        attempt, max_retries, elapsed, exc,
+                    )
+                    should_retry = True
+                else:
+                    raise
+            except OpenAIError as exc:
                 elapsed = time.monotonic() - t0
                 err_body = getattr(exc, 'body', None) or {}
-                err_code = err_body.get('error', {}).get('code', '') if isinstance(err_body, dict) else ''
+                err_code = (
+                    err_body.get('error', {}).get('code', '')
+                    if isinstance(err_body, dict) else ''
+                )
                 if err_code == 'json_validate_failed' and attempt < max_retries:
-                    failed = err_body.get('error', {}).get('failed_generation', '')[:200]
+                    failed = (
+                        err_body.get('error', {}).get('failed_generation', '')[:200]
+                        if isinstance(err_body, dict) else ''
+                    )
                     log.warning(
                         "<<< JSON validation failed (attempt %d/%d, %.1fs) — retrying. "
                         "Preview: %s...",
                         attempt, max_retries, elapsed, failed,
                     )
-                    await asyncio.sleep(1.0 * attempt)  # brief back-off
-                    continue
-                raise
-            elapsed = time.monotonic() - t0
-            break  # success
+                    should_retry = True
+                else:
+                    raise
+            else:
+                elapsed = time.monotonic() - t0
+
+        # Retry outside the semaphore so we don't hold it during sleep.
+        if should_retry:
+            await asyncio.sleep(1.0 * attempt)
+            continue
+        break  # success
 
     log.debug("<<< Structured response (%.1fs): %s",
               elapsed, type(response).__name__)
@@ -1796,9 +1828,25 @@ async def summarize_cells(
 
             if mode == "json_schema":
                 # Single-shot structured JSON call — no multi-turn.
-                response, was_cached = await _cached_json_call(
-                    prompt, structured_llm, model, cache, sem,
-                )
+                try:
+                    response, was_cached = await _cached_json_call(
+                        prompt, structured_llm, model, cache, sem,
+                    )
+                except (OpenAIError, OutputParserException) as exc:
+                    err_body = getattr(exc, 'body', None) or {}
+                    err_code = (
+                        err_body.get('error', {}).get('code', '')
+                        if isinstance(err_body, dict) else ''
+                    )
+                    log.warning(
+                        "  %s: LLM call failed after retries "
+                        "(cells %d–%d, %s) — skipping batch. Error: %s",
+                        nb_src,
+                        min(batch_indices), max(batch_indices),
+                        err_code or type(exc).__name__,
+                        str(exc)[:300],
+                    )
+                    continue
                 if was_cached:
                     total_cached += 1
                 else:
@@ -2895,10 +2943,26 @@ async def async_main(args: argparse.Namespace) -> int:
     version_cfg = SUMMARY_VERSIONS[version_label]
     model = args.model or version_cfg["model"]
     output_mode = version_cfg.get("mode", "tools")
+
+    # Resolve base_url: CLI flag > version config > default.
+    base_url = args.base_url
+    if base_url == DEFAULT_LM_STUDIO_URL and "base_url" in version_cfg:
+        # CLI wasn't explicitly set — use the version's baked-in URL.
+        base_url = version_cfg["base_url"]
+
+    # Resolve API key: CLI flag > version config env var > default.
+    api_key = args.api_key
+    api_key_env = version_cfg.get("api_key_env")
+    if api_key == "lm-studio" and api_key_env:
+        api_key = os.environ.get(api_key_env, "")
+        if not api_key:
+            log.error("%s environment variable is not set", api_key_env)
+            return 1
+
     if not model and not args.dry_run:
         # Only auto-detect when URL looks like a local LM Studio endpoint.
-        if ":1234" in args.base_url:
-            model = detect_lm_studio_model(args.base_url)
+        if ":1234" in base_url:
+            model = detect_lm_studio_model(base_url)
         else:
             log.error("--model is required for non-LM-Studio endpoints")
             return 1
@@ -2921,8 +2985,8 @@ async def async_main(args: argparse.Namespace) -> int:
     if not args.dry_run:
         max_tokens = version_cfg.get("max_tokens")
         llm_kwargs: dict = {
-            "base_url": args.base_url,
-            "api_key": args.api_key,
+            "base_url": base_url,
+            "api_key": api_key,
             "model": model or "local-model",
         }
         if max_tokens:
@@ -2930,7 +2994,7 @@ async def async_main(args: argparse.Namespace) -> int:
         llm = ChatOpenAI(**llm_kwargs)
         log.info(
             "LLM: model=%s, base_url=%s, version=%s, mode=%s",
-            model, args.base_url, version_label, output_mode,
+            model, base_url, version_label, output_mode,
         )
 
     sem = asyncio.Semaphore(args.jobs)

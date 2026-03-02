@@ -4,8 +4,11 @@
 No Weaviate required.  Exercises the full prompt→LLM→parse pipeline.
 
 Usage:
-    # Requires GROQ_API_KEY in environment
+    # Requires GROQ_API_KEY in environment (uses 20b by default)
     python scripts/test_groq_integration.py
+
+    # With a specific version
+    python scripts/test_groq_integration.py --version v2-groq-gpt-oss
 
     # With verbose LLM debug logging
     python scripts/test_groq_integration.py -v
@@ -108,6 +111,315 @@ SAMPLE_CELLS = [
 ]
 
 
+# ── Failing batch from basetypes.lisp (json_validate_failed) ─────────
+
+BASETYPES_CELLS = [
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=1,
+        cell_type="markdown",
+        code_text="",
+        comment_text=(
+            "; FTY type support library\n"
+            "; Copyright (C) 2014 Centaur Technology\n"
+            ";\n"
+            "; Contact:\n"
+            ";   Centaur Technology Formal Verification Group\n"
+            ";   7600-C N. Capital of Texas Highway, Suite 300, Austin, TX 78731, USA.\n"
+            ";   http://www.centtech.com/\n"
+            ";\n"
+            "; License: (An MIT/X11-style license)\n"
+            ";\n"
+            ';   Permission is hereby granted, free of charge, to any person obtaining a\n'
+            ';   copy of this software and associated documentation files (the "Software"),\n'
+            ";   to deal in the Software without restriction, including without limitation\n"
+            ";   the rights to use, copy, modify, merge, publish, distribute, sublicense,\n"
+            ";   and/or sell copies of the Software, and to permit persons to whom the\n"
+            ";   Software is furnished to do so, subject to the following conditions:\n"
+            ";\n"
+            ";   The above copyright notice and this permission notice shall be included in\n"
+            ";   all copies or substantial portions of the Software.\n"
+            ";\n"
+            ';   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n'
+            ";   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+            ";   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+            ";   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+            ";   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\n"
+            ";   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\n"
+            ";   DEALINGS IN THE SOFTWARE.\n"
+            ";\n"
+            "; Original author: Sol Swords <sswords@centtech.com>"
+        ),
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=2,
+        cell_type="code",
+        code_text='(in-package "ACL2")',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=3,
+        cell_type="code",
+        code_text='(include-book "std/basic/defs" :dir :system)',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=4,
+        cell_type="code",
+        code_text='(include-book "std/basic/pos-fix" :dir :system)',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=5,
+        cell_type="code",
+        code_text='(include-book "std/lists/list-defuns" :dir :system)',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=6,
+        cell_type="code",
+        code_text='(include-book "fixtype")',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=7,
+        cell_type="code",
+        code_text='(local (include-book "std/lists/equiv" :dir :system))',
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=8,
+        cell_type="code",
+        code_text="(defconst fty::*defbasetype-keys*\n  '(:name\n    :fix\n    :topic))",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["FTY::*DEFBASETYPE-KEYS*"],
+        symbol_kinds=["constant"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=9,
+        cell_type="code",
+        code_text=(
+            ";; This is just deffixtype with defaults for the names and with :define t.  We\n"
+            ";; wouldn't need to take the equiv name as an input, but since we're defining\n"
+            ";; it we'd like it to be tags-searchable.\n"
+            "(defun fty::defbasetype-fn (equiv pred keys)\n"
+            "  (declare (xargs :mode :program))\n"
+            "  (b* ((__function__ 'fty::defbasetype-fn)\n"
+            "       ((mv kwd-alist args) (std::extract-keywords __function__\n"
+            "                                                   fty::*defbasetype-keys*\n"
+            "                                                   keys nil))\n"
+            "       ((when args) (raise \"Bad args: ~x0\" args))\n"
+            "       (pkg (if (equal (symbol-package-name pred) \"COMMON-LISP\")\n"
+            "                'acl2::foo\n"
+            "              pred))\n"
+            "       (typename (or (std::getarg :name nil kwd-alist)\n"
+            "                     (b* ((predname (symbol-name pred))\n"
+            "                          (len (length predname))\n"
+            "                          (p? (char predname (- len 1)))\n"
+            "                          ((unless (eql p? #\\P)) pred)\n"
+            "                          (dash? (char predname (- len 2)))\n"
+            "                          (newlen (- len (if (eql dash? #\\-) 2 1))))\n"
+            "                       (intern-in-package-of-symbol\n"
+            "                        (subseq predname 0 newlen)\n"
+            "                        pkg))))\n"
+            "       (fix (or (std::getarg :fix nil kwd-alist)\n"
+            "                (intern-in-package-of-symbol\n"
+            "                 (concatenate 'string (symbol-name typename) \"-FIX\")\n"
+            "                 pkg)))\n"
+            "       (topic (std::getarg :topic typename kwd-alist)))\n"
+            "    `(fty::deffixtype ,typename :pred ,pred :fix ,fix :equiv ,equiv :define t :topic ,topic)))"
+        ),
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["FTY::DEFBASETYPE-FN"],
+        symbol_kinds=["function"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=10,
+        cell_type="code",
+        code_text="(defmacro fty::defbasetype (equiv pred &rest keys)\n  (fty::defbasetype-fn equiv pred keys))",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["FTY::DEFBASETYPE"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=11,
+        cell_type="code",
+        code_text="(fty::defbasetype bit-equiv bitp :fix bfix :topic bitp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::BIT-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=12,
+        cell_type="code",
+        code_text="(fty::defbasetype nat-equiv natp :fix nfix :topic natp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::NAT-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=13,
+        cell_type="code",
+        code_text="(fty::defbasetype int-equiv integerp :fix ifix :name int :topic integerp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::INT-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=14,
+        cell_type="code",
+        code_text="(fty::defbasetype rational-equiv rationalp :fix rfix :topic rationalp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::RATIONAL-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=15,
+        cell_type="code",
+        code_text="(fty::defbasetype number-equiv acl2-numberp :fix fix :topic acl2-numberp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::NUMBER-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=16,
+        cell_type="code",
+        code_text="(fty::deffixtype true-list\n  :pred true-listp\n  :fix list-fix\n  :equiv list-equiv\n  :topic true-listp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=17,
+        cell_type="code",
+        code_text="(local (in-theory (enable streqv)))",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=18,
+        cell_type="code",
+        code_text="(fty::deffixtype string\n  :pred stringp\n  :fix str-fix\n  :equiv streqv\n  :topic stringp)",
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=19,
+        cell_type="code",
+        code_text=(
+            '(defsection true-p\n'
+            '  :parents (fty::basetypes)\n'
+            '  :short "@(call true-p) recognizes only the symbol @(\'t\')."\n'
+            '\n'
+            '  (defun true-p (x)\n'
+            '    (declare (xargs :guard t))\n'
+            '    (eq x t)))'
+        ),
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::TRUE-P"],
+        symbol_kinds=["function"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=20,
+        cell_type="code",
+        code_text=(
+            '(defsection true-fix\n'
+            '  :parents (fty::basetypes)\n'
+            '  :short "@(call true-fix) ignores its argument and unconditionally returns @(\'t\')."\n'
+            '\n'
+            '  (defun true-fix (x)\n'
+            '    (declare (xargs :guard t)\n'
+            '             (ignore x))\n'
+            '    t))'
+        ),
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::TRUE-FIX"],
+        symbol_kinds=["function"],
+    ),
+    CellRecord(
+        notebook_source="books/centaur/fty/basetypes.lisp",
+        cell_index=21,
+        cell_type="code",
+        code_text=(
+            '(defsection true-equiv\n'
+            '  :parents (fty::basetypes)\n'
+            '  :short "@(call true-equiv) is a ``degenerate\'\' equivalence for @(see true-p) objects."\n'
+            '  :long "<p>Because of the way @(see true-fix) works, this is always just true.</p>"\n'
+            '\n'
+            '  ;; bozo gross\n'
+            '  (local (set-default-hints \'(\'(:in-theory (enable true-fix true-p)))))\n'
+            '\n'
+            '  (fty::deffixtype true\n'
+            '    :pred true-p\n'
+            '    :fix true-fix\n'
+            '    :equiv true-equiv\n'
+            '    :define t\n'
+            '    :topic true-p))'
+        ),
+        comment_text="",
+        package="ACL2",
+        is_portcullis=False,
+        symbol_names=["ACL2::TRUE-EQUIV"],
+        symbol_kinds=["macro"],
+    ),
+]
+
+
 def _build_cell_prompt(cells: list[CellRecord]) -> str:
     """Build a cell-batch prompt using v3 templates."""
     jinja_env = _load_prompt_templates("v3")
@@ -188,8 +500,80 @@ async def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | di
     # Cell 3 (my-double) should have at least one idea
     assert 3 in summaries, "Cell 3 (my-double) should have an idea"
 
-    print("✓ Cell batch test PASSED")
+    # ── Symbol assertions ──
+    # Cell 3 defines MY-DOUBLE — at least one idea should carry the symbol
+    cell3_syms = [sr.symbol for sr in summaries[3] if sr.symbol]
+    assert cell3_syms, (
+        f"Cell 3 defines MY-DOUBLE but no idea carries a symbol.\n"
+        f"  Ideas: {[sr.what[:60] for sr in summaries[3]]}"
+    )
+    print(f"  Cell 3 symbols: {cell3_syms}")
+
+    # Cell 4 defines MY-DOUBLE-IS-EVEN — at least one idea should carry it
+    if 4 in summaries:
+        cell4_syms = [sr.symbol for sr in summaries[4] if sr.symbol]
+        assert cell4_syms, (
+            f"Cell 4 defines MY-DOUBLE-IS-EVEN but no idea carries a symbol.\n"
+            f"  Ideas: {[sr.what[:60] for sr in summaries[4]]}"
+        )
+        print(f"  Cell 4 symbols: {cell4_syms}")
+
+    # Check that cells without Defines: headers have NO symbol
+    for ci in [0, 1, 2]:
+        if ci in summaries:
+            bad = [sr for sr in summaries[ci] if sr.symbol]
+            assert not bad, (
+                f"Cell {ci} has no Defines: header but idea(s) have "
+                f"symbol={[sr.symbol for sr in bad]}"
+            )
+    print("  Non-defining cells correctly have no symbol ✓")
+
+    print("\n✓ Cell batch test PASSED")
     return response
+
+
+async def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
+    """Test the basetypes.lisp batch that triggers json_validate_failed."""
+    print("\n" + "=" * 60)
+    print("TEST 1b: Basetypes Batch (json_validate_failed reproducer)")
+    print("=" * 60)
+
+    prompt = _build_cell_prompt(BASETYPES_CELLS)
+    print(f"Prompt length: {len(prompt)} chars, {len(prompt.encode())} bytes")
+    print(f"Cells: {len(BASETYPES_CELLS)} (indices {BASETYPES_CELLS[0].cell_index}-{BASETYPES_CELLS[-1].cell_index})")
+
+    structured_llm = llm.with_structured_output(
+        CellBatchResponse, method="json_schema", strict=True,
+    )
+    sem = asyncio.Semaphore(1)
+
+    try:
+        response, was_cached = await _cached_json_call(
+            prompt, structured_llm, model, cache=None, sem=sem,
+        )
+    except Exception as exc:
+        print(f"\n✗ Basetypes batch FAILED with {type(exc).__name__}: {exc}")
+        raise
+
+    print(f"\nCached: {was_cached}")
+    print(f"Response type: {type(response).__name__}")
+
+    summaries, continuation = _json_response_to_summaries(response)
+    total_ideas = sum(len(v) for v in summaries.values())
+    print(f"Cells covered: {sorted(summaries.keys())}")
+    print(f"Total ideas: {total_ideas}")
+
+    for cell_idx in sorted(summaries.keys()):
+        for i, sr in enumerate(summaries[cell_idx]):
+            line = f"  Cell {cell_idx} idea {i}:"
+            if sr.symbol:
+                line += f" sym={sr.symbol}"
+            print(line)
+
+    assert len(summaries) >= 10, f"Expected ≥10 cells covered, got {len(summaries)}"
+    assert total_ideas >= 15, f"Expected ≥15 ideas, got {total_ideas}"
+
+    print("\n✓ Basetypes batch test PASSED")
 
 
 async def test_notebook_summary(
@@ -245,12 +629,23 @@ async def run_all():
         print("ERROR: GROQ_API_KEY not set in environment")
         sys.exit(1)
 
-    version_cfg = SUMMARY_VERSIONS["v2-groq-gpt-oss"]
+    # Pick version: --version flag or default to 20b
+    version_name = "v3-groq-gpt-oss-20b"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--version" and i + 1 < len(sys.argv):
+            version_name = sys.argv[i + 1]
+    if version_name not in SUMMARY_VERSIONS:
+        print(f"ERROR: unknown version {version_name!r}")
+        print(f"  Available: {', '.join(SUMMARY_VERSIONS)}")
+        sys.exit(1)
+
+    version_cfg = SUMMARY_VERSIONS[version_name]
     model = version_cfg["model"]
     max_tokens = version_cfg.get("max_tokens")
+    base_url = version_cfg.get("base_url", "https://api.groq.com/openai/v1")
 
     llm_kwargs = {
-        "base_url": "https://api.groq.com/openai/v1",
+        "base_url": base_url,
         "api_key": api_key,
         "model": model,
     }
@@ -264,6 +659,7 @@ async def run_all():
     print(f"Cells: {len(SAMPLE_CELLS)}")
 
     cell_response = await test_cell_batch(llm, model)
+    await test_basetypes_batch(llm, model)
     await test_notebook_summary(llm, model, cell_response)
 
     print("\n" + "=" * 60)
