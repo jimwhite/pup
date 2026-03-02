@@ -388,11 +388,13 @@ class TestCachedToolCall:
         """Multi-turn stops at max_turns even if model keeps calling tools."""
         from summarize_kg import _cached_tool_call
 
-        # Every response has a tool call — should stop at max_turns
+        # Every response has a UNIQUE tool call — should stop at max_turns
+        counter = iter(range(20))
         def make_resp():
+            n = next(counter)
             r = MagicMock()
             r.tool_calls = [
-                {"name": "ReportWhat", "args": {"cell_number": 1, "summary": "W"}, "id": "t"},
+                {"name": "ReportWhat", "args": {"cell_number": n, "summary": f"W{n}"}, "id": f"t{n}"},
             ]
             return r
 
@@ -411,6 +413,37 @@ class TestCachedToolCall:
 
         # Should have 3 tool calls (1 per turn, 3 turns)
         assert len(tool_calls) == 3
+        assert mock_llm.ainvoke.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_stall_detection(self, sem) -> None:
+        """Multi-turn breaks after 2 consecutive duplicate-only turns."""
+        from summarize_kg import _cached_tool_call
+
+        # All responses return the exact same tool call — stall detection
+        def make_resp():
+            r = MagicMock()
+            r.tool_calls = [
+                {"name": "ReportWhat", "args": {"cell_number": 1, "summary": "W"}, "id": "t"},
+            ]
+            return r
+
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke.side_effect = [make_resp() for _ in range(20)]
+
+        progress_fn = lambda all_tcs, turn_tcs: [
+            "progress" for _ in turn_tcs
+        ]
+
+        tool_calls, _ = await _cached_tool_call(
+            "test prompt", mock_llm, "test-model", None, sem,
+            tool_response_fn=progress_fn,
+            max_turns=10,
+        )
+
+        # Turn 1: new call (cell 1). Turn 2: dup (stall=1). Turn 3: dup (stall=2 → break).
+        # So we get calls from turns 1 and 2 = 2 total, and 3 invocations.
+        assert len(tool_calls) == 2
         assert mock_llm.ainvoke.call_count == 3
 
     @pytest.mark.asyncio

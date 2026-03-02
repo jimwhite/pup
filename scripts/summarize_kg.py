@@ -98,9 +98,9 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "description": "Initial LM Studio run with qwen3-coder-next",
     },
     "v2-groq-gpt-oss": {
-        "model": "gpt-oss-20b",
+        "model": "openai/gpt-oss-120b",
         "prompts": "v2",
-        "description": "Groq API with gpt-oss-20b, symbol tagging",
+        "description": "Groq API with gpt-oss-120b, symbol tagging",
     },
 }
 
@@ -1155,6 +1155,8 @@ async def _cached_tool_call(
     prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
     log.debug(">>> HumanMessage (%d chars):\n%s", len(prompt), prompt_preview)
 
+    stall_count = 0  # consecutive turns with no new unique tool calls
+
     async with sem:
         for turn in range(max_turns):
             t0 = time.monotonic()
@@ -1176,6 +1178,32 @@ async def _cached_tool_call(
                 {"name": tc["name"], "args": tc["args"]}
                 for tc in response.tool_calls
             ]
+
+            # Detect stalling: if every call in this turn is an
+            # exact duplicate of something already collected, the
+            # model is stuck in a loop.  Break after 2 consecutive
+            # stalled turns to be generous.
+            existing = {
+                (tc["name"], json.dumps(tc["args"], sort_keys=True))
+                for tc in all_tool_calls
+            }
+            new_calls = [
+                tc for tc in turn_calls
+                if (tc["name"], json.dumps(tc["args"], sort_keys=True))
+                not in existing
+            ]
+            if not new_calls:
+                stall_count += 1
+                if stall_count >= 2:
+                    log.debug(
+                        "<<< AIMessage turn %d (%.1fs): stalled %d turns "
+                        "with only duplicate calls — stopping multi-turn",
+                        turn + 1, elapsed, stall_count,
+                    )
+                    break
+            else:
+                stall_count = 0
+
             all_tool_calls.extend(turn_calls)
 
             # Log every tool call from this turn.

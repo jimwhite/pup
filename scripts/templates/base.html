@@ -31,7 +31,7 @@
   </style>
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top">
     <div class="container-fluid">
       <a class="navbar-brand" href="/">ACL2 KG</a>
       <ul class="navbar-nav me-auto">
@@ -57,7 +57,7 @@
           <option value="keyword"  {%- if request.args.get('mode')=='keyword' %} selected{% endif %}>Keyword</option>
         </select>
         {% if available_versions %}
-        <select class="form-select me-2" name="version" style="max-width:170px">
+        <select class="form-select me-2" name="version" id="version-select" style="max-width:170px">
           <option value="">All versions</option>
           {% for v in available_versions %}
           <option value="{{ v }}" {%- if selected_version == v %} selected{% endif %}>{{ v }}</option>
@@ -69,7 +69,7 @@
     </div>
   </nav>
 
-  <main class="container-fluid px-4">
+  <main class="container-fluid px-4 mt-3">
     {% block content %}{% endblock %}
   </main>
 
@@ -77,6 +77,65 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lisp.min.js"></script>
   <script>hljs.highlightAll();</script>
+  <script>
+  // ── Sticky version selection ──────────────────────────────────────
+  (function() {
+    const STORAGE_KEY = 'acl2kg_version';
+    const sel = document.getElementById('version-select');
+
+    // On page load: if URL has ?version=, store it. Otherwise restore
+    // saved version (into the dropdown AND inject into the URL).
+    const params = new URLSearchParams(window.location.search);
+    const urlVersion = params.get('version');
+
+    if (urlVersion !== null) {
+      // URL has an explicit version param — save it (even if empty = "All")
+      localStorage.setItem(STORAGE_KEY, urlVersion);
+    } else {
+      // No version in URL — restore from storage if we have one
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved && sel) {
+        sel.value = saved;
+        // Also update the current URL so server-side filtering works
+        // on page loads from navigation links.
+        params.set('version', saved);
+        const newUrl = window.location.pathname + '?' + params.toString();
+        window.history.replaceState(null, '', newUrl);
+        // Reload so the server uses the version filter
+        window.location.replace(newUrl);
+        return; // don't run the rest while reloading
+      }
+    }
+
+    // When the user changes the dropdown, save + reload with the new version
+    if (sel) {
+      sel.addEventListener('change', function() {
+        localStorage.setItem(STORAGE_KEY, this.value);
+        params.set('version', this.value);
+        window.location.search = params.toString();
+      });
+    }
+
+    // Inject version param into all internal links on the page
+    const version = localStorage.getItem(STORAGE_KEY);
+    if (version) {
+      document.querySelectorAll('a[href]').forEach(function(a) {
+        const href = a.getAttribute('href');
+        // Only modify internal links (same origin, not #anchors, not external)
+        if (!href || href.startsWith('#') || href.startsWith('http')
+            || href.startsWith('javascript:')) return;
+        try {
+          const url = new URL(href, window.location.origin);
+          if (url.origin !== window.location.origin) return;
+          if (!url.searchParams.has('version')) {
+            url.searchParams.set('version', version);
+            a.setAttribute('href', url.pathname + url.search + url.hash);
+          }
+        } catch(e) {}
+      });
+    }
+  })();
+  </script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

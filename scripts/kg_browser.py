@@ -9,6 +9,7 @@ Usage:
 import atexit
 import argparse
 import os
+import time
 
 from flask import (Flask, render_template, request, redirect,
                    url_for, abort)
@@ -613,7 +614,11 @@ def _get_notebook_summary(client, source_file, version=None):
 
 
 def _get_available_versions(client):
-    """Return sorted list of distinct summary version labels."""
+    """Return sorted list of distinct summary version labels (cached 60s)."""
+    now = time.monotonic()
+    if (_version_cache["versions"] is not None
+            and now - _version_cache["ts"] < 60):
+        return _version_cache["versions"]
     try:
         col = client.collections.get("ACL2Summary")
         agg = col.aggregate.over_all(group_by="version", total_count=True)
@@ -622,9 +627,13 @@ def _get_available_versions(client):
             for v in agg.groups
             if v.grouped_by.value
         )
-        return versions
     except Exception:
-        return []
+        versions = []
+    _version_cache["versions"] = versions
+    _version_cache["ts"] = now
+    return versions
+
+_version_cache: dict = {"versions": None, "ts": 0.0}
 
 
 # ── Main ─────────────────────────────────────────────────────────────
