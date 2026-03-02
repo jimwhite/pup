@@ -57,7 +57,7 @@ from typing import Callable
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from openai import LengthFinishReasonError
+from openai import BadRequestError, LengthFinishReasonError
 from pydantic import BaseModel, Field
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -105,6 +105,13 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "mode": "json_schema",
         "max_tokens": 16384,
         "description": "Groq API with gpt-oss-120b, structured JSON output",
+    },
+    "v3-groq-gpt-oss-20b": {
+        "model": "openai/gpt-oss-20b",
+        "prompts": "v3",
+        "mode": "json_schema",
+        "max_tokens": 16384,
+        "description": "Groq API with gpt-oss-20b, structured JSON output",
     },
 }
 
@@ -1345,30 +1352,47 @@ async def _cached_json_call(
     log.debug(">>> HumanMessage [json_schema] (%d chars):\n%s",
               len(prompt), prompt_preview)
 
-    async with sem:
-        t0 = time.monotonic()
-        try:
-            response = await structured_llm.ainvoke(prompt)
-        except LengthFinishReasonError as exc:
-            elapsed = time.monotonic() - t0
-            usage = getattr(exc, 'completion', None)
-            usage_info = ""
-            if usage:
-                u = getattr(usage, 'usage', None)
-                if u:
-                    usage_info = (
-                        f" (completion={u.completion_tokens}, "
-                        f"prompt={u.prompt_tokens}, "
-                        f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        async with sem:
+            t0 = time.monotonic()
+            try:
+                response = await structured_llm.ainvoke(prompt)
+            except LengthFinishReasonError as exc:
+                elapsed = time.monotonic() - t0
+                usage = getattr(exc, 'completion', None)
+                usage_info = ""
+                if usage:
+                    u = getattr(usage, 'usage', None)
+                    if u:
+                        usage_info = (
+                            f" (completion={u.completion_tokens}, "
+                            f"prompt={u.prompt_tokens}, "
+                            f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
+                        )
+                log.warning(
+                    "<<< Structured response TRUNCATED (%.1fs)%s — "
+                    "model hit max_tokens before completing JSON. "
+                    "Consider increasing max_tokens or reducing batch size.",
+                    elapsed, usage_info,
+                )
+                raise
+            except BadRequestError as exc:
+                elapsed = time.monotonic() - t0
+                err_body = getattr(exc, 'body', None) or {}
+                err_code = err_body.get('error', {}).get('code', '') if isinstance(err_body, dict) else ''
+                if err_code == 'json_validate_failed' and attempt < max_retries:
+                    failed = err_body.get('error', {}).get('failed_generation', '')[:200]
+                    log.warning(
+                        "<<< JSON validation failed (attempt %d/%d, %.1fs) — retrying. "
+                        "Preview: %s...",
+                        attempt, max_retries, elapsed, failed,
                     )
-            log.warning(
-                "<<< Structured response TRUNCATED (%.1fs)%s — "
-                "model hit max_tokens before completing JSON. "
-                "Consider increasing max_tokens or reducing batch size.",
-                elapsed, usage_info,
-            )
-            raise
-        elapsed = time.monotonic() - t0
+                    await asyncio.sleep(1.0 * attempt)  # brief back-off
+                    continue
+                raise
+            elapsed = time.monotonic() - t0
+            break  # success
 
     log.debug("<<< Structured response (%.1fs): %s",
               elapsed, type(response).__name__)

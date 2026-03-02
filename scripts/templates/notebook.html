@@ -71,6 +71,7 @@
     {% for cs in cell_summaries[cell.index] %}
     <div class="summary-box{% if loop.index0 > 0 %} mt-1{% endif %}">
       {% if cell_summaries[cell.index]|length > 1 %}<span class="badge bg-secondary me-1" style="font-size:.65em">{{ loop.index }}/{{ cell_summaries[cell.index]|length }}</span>{% endif %}
+      {% if cs.symbol %}<span class="badge bg-info me-1" style="font-size:.65em">{{ cs.symbol }}</span>{% endif %}
       {% if cs.what %}<span class="what-label">What:</span> {{ cs.what }}<br>{% endif %}
       {% if cs.why %}<span class="why-label">Why:</span> {{ cs.why }}<br>{% endif %}
       {% if cs.how %}<span class="how-label">How:</span> {{ cs.how }}{% endif %}
