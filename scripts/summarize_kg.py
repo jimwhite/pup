@@ -95,12 +95,14 @@ SUMMARY_VERSIONS: dict[str, dict] = {
     "v1-qwen3-coder": {
         "model": "qwen/qwen3-coder-next",
         "prompts": "v1",
+        "mode": "tools",
         "description": "Initial LM Studio run with qwen3-coder-next",
     },
     "v2-groq-gpt-oss": {
         "model": "openai/gpt-oss-120b",
-        "prompts": "v2",
-        "description": "Groq API with gpt-oss-120b, symbol tagging",
+        "prompts": "v3",
+        "mode": "json_schema",
+        "description": "Groq API with gpt-oss-120b, structured JSON output",
     },
 }
 
@@ -638,6 +640,67 @@ class SummaryHow(BaseModel):
 
 
 SUMMARY_TOOLS = [SummaryWhat, SummaryWhy, SummaryHow]
+
+
+# ─── JSON-schema response models (for with_structured_output) ───────
+
+
+class CellIdea(BaseModel):
+    """A single atomic idea extracted from a notebook cell."""
+
+    cell_number: int = Field(description="The 0-based cell index")
+    what: str = Field(
+        description="What this cell defines, proves, or configures.  "
+        "1-3 precise sentences covering one distinct idea."
+    )
+    why: str = Field(
+        default="",
+        description="Why this matters — the goal, problem solved, or proof "
+        "obligation discharged.  1-3 sentences.",
+    )
+    how: str = Field(
+        default="",
+        description="Usage instructions — how to call/invoke/include.  "
+        "1-3 sentences.  Omit if not applicable.",
+    )
+    symbol: str = Field(
+        default="",
+        description="The specific symbol (from the Defines: header) "
+        "this idea pertains to, if applicable.",
+    )
+
+
+class CellBatchResponse(BaseModel):
+    """Structured response for a batch of notebook cells."""
+
+    ideas: list[CellIdea] = Field(
+        description="One or more atomic ideas extracted from the cells.  "
+        "Each cell may have multiple ideas."
+    )
+    continuation: str = Field(
+        default="",
+        description="Key context from this batch needed to understand "
+        "subsequent cells.  Empty if this is the last batch.",
+    )
+
+
+class NotebookSummaryResponse(BaseModel):
+    """Structured what/why/how summary for a notebook or directory."""
+
+    what: str = Field(
+        description="Description of overall functionality.  2-4 sentences.  "
+        "Start with the single most important capability."
+    )
+    why: str = Field(
+        default="",
+        description="The broader purpose or goal.  2-4 sentences.  "
+        "Start with the primary purpose.",
+    )
+    how: str = Field(
+        default="",
+        description="Usage instructions — include-book path, key functions/macros, "
+        "and typical invocation patterns.  2-4 sentences.",
+    )
 
 
 # ─── LLM Call Memoization (SQLite) ──────────────────────────────────
@@ -1244,6 +1307,60 @@ async def _cached_tool_call(
     return all_tool_calls, False
 
 
+async def _cached_json_call(
+    prompt: str,
+    structured_llm,
+    model: str,
+    cache: LLMCache | None,
+    sem: asyncio.Semaphore,
+) -> tuple[BaseModel, bool]:
+    """Invoke an LLM with structured output (json_schema) and caching.
+
+    Unlike ``_cached_tool_call``, this is single-shot — one ``ainvoke``,
+    one response.  The model returns a validated Pydantic object directly
+    because ``with_structured_output`` handles parsing.
+
+    Returns ``(response_model, was_cached)`` where *response_model* is
+    a Pydantic ``BaseModel`` instance (e.g. CellBatchResponse or
+    NotebookSummaryResponse).
+    """
+    if cache is not None:
+        cached = cache.get(prompt, model)
+        if cached is not None:
+            # Reconstruct the Pydantic model from cached JSON.
+            # We store the raw JSON dict; the caller's schema is used
+            # to reconstruct via the structured_llm's bound schema.
+            data = json.loads(cached)
+            # structured_llm is llm.with_structured_output(SomeModel),
+            # but we can't easily get SomeModel back.  Store as dict
+            # and return a thin wrapper — callers accept BaseModel.
+            # Instead, cache the class name alongside data so we can
+            # reconstruct.  For simplicity, return the dict and let
+            # callers detect dict vs BaseModel.
+            return data, True
+
+    prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
+    log.debug(">>> HumanMessage [json_schema] (%d chars):\n%s",
+              len(prompt), prompt_preview)
+
+    async with sem:
+        t0 = time.monotonic()
+        response = await structured_llm.ainvoke(prompt)
+        elapsed = time.monotonic() - t0
+
+    log.debug("<<< Structured response (%.1fs): %s",
+              elapsed, type(response).__name__)
+
+    # Cache the response as JSON.
+    if cache is not None:
+        if isinstance(response, BaseModel):
+            cache.put(prompt, response.model_dump_json(), model)
+        else:
+            cache.put(prompt, json.dumps(response), model)
+
+    return response, False
+
+
 def _tool_calls_to_summaries(
     tool_calls: list[dict],
 ) -> tuple[dict[int, list[SummaryResult]], str]:
@@ -1318,6 +1435,47 @@ def _tool_calls_to_summaries(
     return summaries, continuation
 
 
+def _json_response_to_summaries(
+    response: CellBatchResponse | dict,
+) -> tuple[dict[int, list[SummaryResult]], str]:
+    """Convert a CellBatchResponse into per-cell SummaryResult lists.
+
+    Mirrors ``_tool_calls_to_summaries`` but for json_schema responses.
+    Each ``CellIdea`` becomes one ``SummaryResult``.
+    """
+    if isinstance(response, dict):
+        response = CellBatchResponse(**response)
+
+    summaries: dict[int, list[SummaryResult]] = {}
+    for idea in response.ideas:
+        sr = SummaryResult(
+            what=idea.what,
+            why=idea.why,
+            how=idea.how,
+            symbol=idea.symbol,
+        )
+        summaries.setdefault(idea.cell_number, []).append(sr)
+
+    return summaries, response.continuation
+
+
+def _json_response_to_result(
+    response: NotebookSummaryResponse | dict,
+) -> SummaryResult:
+    """Convert a NotebookSummaryResponse into a SummaryResult.
+
+    Mirrors ``_summary_tools_to_result`` but for json_schema responses.
+    """
+    if isinstance(response, dict):
+        response = NotebookSummaryResponse(**response)
+
+    return SummaryResult(
+        what=response.what,
+        why=response.why,
+        how=response.how,
+    )
+
+
 async def summarize_cells(
     client: weaviate.WeaviateClient,
     notebook_sources: list[str],
@@ -1331,19 +1489,31 @@ async def summarize_cells(
     dry_run: bool = False,
     jinja_env: jinja2.Environment | None = None,
     version: str = "",
+    mode: str = "tools",
 ) -> dict[str, list[tuple[int, int, SummaryResult]]]:
-    """Phase 1: Generate cell-level summaries via batched tool calling.
+    """Phase 1: Generate cell-level summaries via batched LLM calls.
 
     Cells are grouped into batches that fit within *context_size* bytes.
-    The LLM receives each batch and calls report_what / report_why /
-    report_how tools for substantive cells.  A continuation context is
-    passed between batches within the same notebook.
+
+    When *mode* is ``"tools"`` (default), the LLM is invoked with tool
+    calling (multi-turn with feedback).  When *mode* is
+    ``"json_schema"``, the LLM returns a structured JSON response
+    validated against ``CellBatchResponse``.
 
     Returns a dict mapping notebook source to a list of
     ``(cell_index, summary_index, SummaryResult)`` tuples.  A cell may
     have multiple summaries (one per distinct idea the LLM identified).
     """
-    llm_with_tools = llm.bind_tools(CELL_TOOLS) if llm else None
+    if mode == "json_schema":
+        structured_llm = (
+            llm.with_structured_output(CellBatchResponse,
+                                       method="json_schema", strict=True)
+            if llm else None
+        )
+        llm_with_tools = None
+    else:
+        llm_with_tools = llm.bind_tools(CELL_TOOLS) if llm else None
+        structured_llm = None
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
 
     total_cells = 0
@@ -1578,18 +1748,30 @@ async def summarize_cells(
                     return responses
                 return fn
 
-            tool_calls, was_cached = await _cached_tool_call(
-                prompt, llm_with_tools, model, cache, sem,
-                tool_response_fn=_make_progress_fn(),
-            )
-            if was_cached:
-                total_cached += 1
+            if mode == "json_schema":
+                # Single-shot structured JSON call — no multi-turn.
+                response, was_cached = await _cached_json_call(
+                    prompt, structured_llm, model, cache, sem,
+                )
+                if was_cached:
+                    total_cached += 1
+                else:
+                    total_llm += 1
+                summaries, continuation_context = (
+                    _json_response_to_summaries(response)
+                )
             else:
-                total_llm += 1
-
-            summaries, continuation_context = _tool_calls_to_summaries(
-                tool_calls,
-            )
+                tool_calls, was_cached = await _cached_tool_call(
+                    prompt, llm_with_tools, model, cache, sem,
+                    tool_response_fn=_make_progress_fn(),
+                )
+                if was_cached:
+                    total_cached += 1
+                else:
+                    total_llm += 1
+                summaries, continuation_context = _tool_calls_to_summaries(
+                    tool_calls,
+                )
 
             # Filter out hallucinated cell indices the LLM may have
             # invented (i.e. indices not present in this batch).
@@ -1716,6 +1898,7 @@ async def summarize_notebooks(
     context_size: int = DEFAULT_CONTEXT_SIZE,
     jinja_env: jinja2.Environment | None = None,
     version: str = "",
+    mode: str = "tools",
 ) -> dict[str, SummaryResult]:
     """Phase 2: Generate notebook-level summaries via map-reduce over cell summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
@@ -1723,6 +1906,31 @@ async def summarize_notebooks(
 
     total_skipped = 0
     total_done = 0
+
+    # Build the LLM wrapper once (tools or structured output).
+    if mode == "json_schema":
+        structured_llm = (
+            llm.with_structured_output(NotebookSummaryResponse,
+                                       method="json_schema", strict=True)
+            if llm else None
+        )
+        llm_with_summary_tools = None
+    else:
+        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS) if llm else None
+        structured_llm = None
+
+    async def _invoke_summary(prompt: str) -> SummaryResult:
+        """Call the LLM in the appropriate mode and return SummaryResult."""
+        if mode == "json_schema":
+            resp, _ = await _cached_json_call(
+                prompt, structured_llm, model, cache, sem,
+            )
+            return _json_response_to_result(resp)
+        else:
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            return _summary_tools_to_result(tcs)
 
     for nb_idx, nb_src in enumerate(notebook_sources, 1):
         ref_key = nb_src
@@ -1754,8 +1962,6 @@ async def summarize_notebooks(
         chunks = _chunk_summaries_by_size(non_empty, context_size)
         intermediates: list[SummaryResult] = []
 
-        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
-
         for chunk in chunks:
             cell_text = _format_cell_summaries(chunk)
             prompt = _render_prompt(
@@ -1766,10 +1972,7 @@ async def summarize_notebooks(
                 topic_section=_format_topic_section(nb_src),
                 cell_summaries=cell_text,
             )
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
-            )
-            intermediates.append(_summary_tools_to_result(tcs))
+            intermediates.append(await _invoke_summary(prompt))
 
         # Reduce: combine intermediates (or use directly if only one chunk).
         if len(intermediates) == 1:
@@ -1794,10 +1997,7 @@ async def summarize_notebooks(
                         topic_section=_format_topic_section(nb_src),
                         section_summaries=rc_text,
                     )
-                    tcs, _ = await _cached_tool_call(
-                        prompt, llm_with_summary_tools, model, cache, sem,
-                    )
-                    new_intermediates.append(_summary_tools_to_result(tcs))
+                    new_intermediates.append(await _invoke_summary(prompt))
                 intermediates = new_intermediates
                 section_text = _format_intermediates(intermediates)
 
@@ -1809,10 +2009,7 @@ async def summarize_notebooks(
                 topic_section=_format_topic_section(nb_src),
                 section_summaries=section_text,
             )
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
-            )
-            final = _summary_tools_to_result(tcs)
+            final = await _invoke_summary(prompt)
 
         nb_summaries[nb_src] = final
 
@@ -2004,9 +2201,35 @@ async def summarize_directories(
     context_size: int = DEFAULT_CONTEXT_SIZE,
     jinja_env: jinja2.Environment | None = None,
     version: str = "",
+    mode: str = "tools",
 ) -> dict[str, SummaryResult]:
     """Phase 3: Bottom-up directory summaries."""
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
+
+    # Build the LLM wrapper once (tools or structured output).
+    if mode == "json_schema":
+        structured_llm = (
+            llm.with_structured_output(NotebookSummaryResponse,
+                                       method="json_schema", strict=True)
+            if llm else None
+        )
+        llm_with_summary_tools = None
+    else:
+        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS) if llm else None
+        structured_llm = None
+
+    async def _invoke_summary(prompt: str) -> SummaryResult:
+        """Call the LLM in the appropriate mode and return SummaryResult."""
+        if mode == "json_schema":
+            resp, _ = await _cached_json_call(
+                prompt, structured_llm, model, cache, sem,
+            )
+            return _json_response_to_result(resp)
+        else:
+            tcs, _ = await _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache, sem,
+            )
+            return _summary_tools_to_result(tcs)
 
     # Build directory tree: dir → list of notebook sources in that dir (non-recursive).
     dir_notebooks: dict[str, list[str]] = defaultdict(list)
@@ -2073,7 +2296,6 @@ async def summarize_directories(
             continue
 
         # Build and invoke prompt, chunking if needed.
-        llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS)
         content_chunks = _chunk_text_parts_by_size(
             contents_parts, context_size, prompt_overhead=400)
 
@@ -2088,10 +2310,7 @@ async def summarize_directories(
                 topic_section=dir_topic,
                 contents="\n\n".join(content_chunks[0]),
             )
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
-            )
-            final = _summary_tools_to_result(tcs)
+            final = await _invoke_summary(prompt)
         else:
             # Multi-pass: summarize each chunk, then reduce.
             chunk_results: list[SummaryResult] = []
@@ -2104,10 +2323,7 @@ async def summarize_directories(
                     topic_section=dir_topic,
                     contents="\n\n".join(cc),
                 )
-                tcs, _ = await _cached_tool_call(
-                    prompt, llm_with_summary_tools, model, cache, sem,
-                )
-                chunk_results.append(_summary_tools_to_result(tcs))
+                chunk_results.append(await _invoke_summary(prompt))
             # Final reduce over chunk results.
             section_text = _format_intermediates(chunk_results)
             prompt = _render_prompt(
@@ -2118,10 +2334,7 @@ async def summarize_directories(
                 topic_section=dir_topic,
                 contents=section_text,
             )
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
-            )
-            final = _summary_tools_to_result(tcs)
+            final = await _invoke_summary(prompt)
         dir_summaries[directory] = final
 
         # Upsert to Weaviate.
@@ -2635,6 +2848,7 @@ async def async_main(args: argparse.Namespace) -> int:
     version_label = args.version
     version_cfg = SUMMARY_VERSIONS[version_label]
     model = args.model or version_cfg["model"]
+    output_mode = version_cfg.get("mode", "tools")
     if not model and not args.dry_run:
         # Only auto-detect when URL looks like a local LM Studio endpoint.
         if ":1234" in args.base_url:
@@ -2665,8 +2879,8 @@ async def async_main(args: argparse.Namespace) -> int:
             model=model or "local-model",
         )
         log.info(
-            "LLM: model=%s, base_url=%s, version=%s",
-            model, args.base_url, version_label,
+            "LLM: model=%s, base_url=%s, version=%s, mode=%s",
+            model, args.base_url, version_label, output_mode,
         )
 
     sem = asyncio.Semaphore(args.jobs)
@@ -2804,6 +3018,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 jinja_env=jinja_env,
                 version=version_label,
+                mode=output_mode,
             )
 
         # ── Phase 2: Notebook summaries ──────────────────────────────
@@ -2817,6 +3032,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 context_size=args.context_size,
                 jinja_env=jinja_env,
                 version=version_label,
+                mode=output_mode,
             )
 
         # ── Phase 3: Directory summaries ─────────────────────────────
@@ -2829,6 +3045,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 context_size=args.context_size,
                 jinja_env=jinja_env,
                 version=version_label,
+                mode=output_mode,
             )
 
         # ── Dry-run report ───────────────────────────────────────────

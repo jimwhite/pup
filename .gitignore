@@ -5,6 +5,12 @@ node_modules/
 data/
 .DS_Store
 scripts/.ingest_checkpoint.json
+scripts/.summarize_checkpoint.json
+scripts/.llm_cache.sqlite
+scripts/*-log*.txt
+scripts/summarize_groq_*.txt
+.vscode/alive/
+test2.lisp
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

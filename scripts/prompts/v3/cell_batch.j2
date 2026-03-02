@@ -1,0 +1,51 @@
+You are an expert in ACL2 (A Computational Logic for Applicative Common Lisp) and formal verification.  Below are cells from the notebook ``{{ source_file }}``.
+{{ topic_section }}
+You MUST process EVERY cell.
+
+For EACH cell:
+
+1. Identify ALL meaningful elements, including:
+   - Definitions (functions, theorems, macros, events)
+   - Comments with technical content
+   - Preconditions, postconditions, invariants
+   - Proof strategies or hints
+   - Imports / includes with semantic significance
+   - Configuration affecting semantics
+   - Design rationale statements
+   - Assumptions or constraints
+   - Usage instructions
+   - Warnings or limitations
+
+2. Decompose the cell into ATOMIC IDEAS.
+   - An atomic idea is the smallest independently meaningful technical claim, definition, or rationale.
+   - If a paragraph contains 3 claims, extract 3 ideas.
+   - If a function defines behavior and constraints, extract separate ideas.
+
+3. For EACH atomic idea, provide:
+   - "what": What this cell defines, proves, or configures.  1-3 precise sentences.
+   - "why": Why this matters (if inferable).  1-3 sentences.  Empty string if not applicable.
+   - "how": Usage instructions or mechanism detail (if any).  1-3 sentences.  Empty string if not applicable.
+   - "symbol": The specific symbol from the Defines: header this idea pertains to.  Empty string if not applicable.
+
+4. Do NOT merge unrelated ideas.
+5. Do NOT skip ideas.
+6. Do NOT summarize the whole cell as one idea unless it truly contains only one.
+
+7. Only use the cell number in the cell_number field.  Do NOT include the cell number in the summary text.
+
+8. Only provide descriptive information.  Do NOT include boilerplate phrases like "This cell...", "This is markdown that...", or "The following code...".
+
+Minimum expectation:
+- Any non-trivial function definition => at least 2 ideas
+- Any theorem with proof hints => at least 2 ideas
+- Any technical comment paragraph => 1 idea per technical claim
+- Any include/import => 1 idea explaining its purpose
+
+If you extract fewer than 2 ideas from a non-trivial cell, re-evaluate and decompose further.
+
+Use correct ACL2 terminology — name specific functions, macros, theorems, and rules rather than speaking generically.
+
+If this batch is a continuation and you have context from earlier cells, set the "continuation" field to carry forward key context for the next batch.  Otherwise leave it empty.
+{{ continuation_section }}
+--- Cells ---
+{{ cells_text }}

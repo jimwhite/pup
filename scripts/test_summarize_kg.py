@@ -22,11 +22,16 @@ from summarize_kg import (
     LLMCache,
     SUMMARY_VERSIONS,
     PROMPTS_DIR,
+    CellIdea,
+    CellBatchResponse,
+    NotebookSummaryResponse,
     _strip_markdown_fences,
     _build_batch_cells_text,
     _batch_cells_by_size,
     _summary_tools_to_result,
     _tool_calls_to_summaries,
+    _json_response_to_summaries,
+    _json_response_to_result,
     _load_prompt_templates,
     _render_prompt,
 )
@@ -900,6 +905,7 @@ class TestSummaryVersions:
             assert "model" in entry, f"Version '{label}' missing 'model'"
             assert "prompts" in entry, f"Version '{label}' missing 'prompts'"
             assert "description" in entry, f"Version '{label}' missing 'description'"
+            assert "mode" in entry, f"Version '{label}' missing 'mode'"
 
     def test_prompt_dirs_exist(self):
         """Each version's prompts directory should exist under PROMPTS_DIR."""
@@ -966,3 +972,190 @@ class TestJinjaTemplates:
             # Should not raise TemplateNotFound
             tmpl = env.get_template(name)
             assert tmpl is not None
+
+    def test_all_v3_templates_exist(self):
+        """All expected template files exist in v3."""
+        expected_templates = [
+            "cell_batch.j2", "notebook_chunk.j2",
+            "notebook_reduce.j2", "directory.j2",
+        ]
+        env = _load_prompt_templates("v3")
+        if env is None:
+            pytest.skip("v3 templates not found")
+        for name in expected_templates:
+            tmpl = env.get_template(name)
+            assert tmpl is not None
+
+    def test_v3_cell_batch_no_tool_references(self):
+        """v3 cell_batch template should not reference tool calling."""
+        env = _load_prompt_templates("v3")
+        if env is None:
+            pytest.skip("v3 templates not found")
+        tmpl = env.get_template("cell_batch.j2")
+        rendered = tmpl.render(
+            source_file="test.lisp",
+            topic_section="",
+            continuation_section="",
+            cells_text="(defun f (x) x)",
+        )
+        # v3 templates should NOT mention tool calling.
+        assert "Call report_what" not in rendered
+        assert "Call report_why" not in rendered
+        assert "Call each tool" not in rendered
+
+
+# ── JSON response converters ────────────────────────────────────────
+
+
+class TestJsonResponseToSummaries:
+    """Test _json_response_to_summaries (CellBatchResponse → per-cell results)."""
+
+    def test_basic_conversion(self):
+        """Single idea per cell converts correctly."""
+        response = CellBatchResponse(
+            ideas=[
+                CellIdea(cell_number=0, what="Defines foo", why="Needed for bar"),
+                CellIdea(cell_number=1, what="Proves thm-x", how="By induction"),
+            ],
+            continuation="Context for next batch",
+        )
+        summaries, cont = _json_response_to_summaries(response)
+        assert cont == "Context for next batch"
+        assert 0 in summaries
+        assert 1 in summaries
+        assert len(summaries[0]) == 1
+        assert summaries[0][0].what == "Defines foo"
+        assert summaries[0][0].why == "Needed for bar"
+        assert summaries[1][0].how == "By induction"
+
+    def test_multiple_ideas_per_cell(self):
+        """Multiple ideas for the same cell index are collected."""
+        response = CellBatchResponse(ideas=[
+            CellIdea(cell_number=5, what="First idea"),
+            CellIdea(cell_number=5, what="Second idea", symbol="MY-FN"),
+        ])
+        summaries, cont = _json_response_to_summaries(response)
+        assert cont == ""
+        assert len(summaries[5]) == 2
+        assert summaries[5][0].what == "First idea"
+        assert summaries[5][1].what == "Second idea"
+        assert summaries[5][1].symbol == "MY-FN"
+
+    def test_empty_ideas(self):
+        """Empty ideas list gives empty summaries."""
+        response = CellBatchResponse(ideas=[])
+        summaries, cont = _json_response_to_summaries(response)
+        assert summaries == {}
+        assert cont == ""
+
+    def test_dict_input(self):
+        """Accepts a raw dict (from cache) as input."""
+        data = {
+            "ideas": [
+                {"cell_number": 3, "what": "Something", "why": "", "how": "", "symbol": ""},
+            ],
+            "continuation": "",
+        }
+        summaries, cont = _json_response_to_summaries(data)
+        assert 3 in summaries
+        assert summaries[3][0].what == "Something"
+
+    def test_symbol_preserved(self):
+        """Symbol field is passed through to SummaryResult."""
+        response = CellBatchResponse(ideas=[
+            CellIdea(cell_number=0, what="Defines X", symbol="ACL2::X"),
+        ])
+        summaries, _ = _json_response_to_summaries(response)
+        assert summaries[0][0].symbol == "ACL2::X"
+
+
+class TestJsonResponseToResult:
+    """Test _json_response_to_result (NotebookSummaryResponse → SummaryResult)."""
+
+    def test_basic_conversion(self):
+        """All fields convert correctly."""
+        response = NotebookSummaryResponse(
+            what="Defines utility macros",
+            why="Simplifies common patterns",
+            how="Include via books/utils.lisp",
+        )
+        result = _json_response_to_result(response)
+        assert isinstance(result, SummaryResult)
+        assert result.what == "Defines utility macros"
+        assert result.why == "Simplifies common patterns"
+        assert result.how == "Include via books/utils.lisp"
+
+    def test_optional_fields_default(self):
+        """Why and how default to empty string."""
+        response = NotebookSummaryResponse(what="Only what provided")
+        result = _json_response_to_result(response)
+        assert result.what == "Only what provided"
+        assert result.why == ""
+        assert result.how == ""
+
+    def test_dict_input(self):
+        """Accepts a raw dict (from cache) as input."""
+        data = {"what": "From dict", "why": "Because", "how": "Like this"}
+        result = _json_response_to_result(data)
+        assert result.what == "From dict"
+        assert result.why == "Because"
+        assert result.how == "Like this"
+
+
+class TestSummaryVersionsMode:
+    """Test that SUMMARY_VERSIONS mode configuration is well-formed."""
+
+    def test_all_versions_have_mode(self):
+        """Every version entry has a 'mode' key with a valid value."""
+        valid_modes = {"tools", "json_schema"}
+        for label, entry in SUMMARY_VERSIONS.items():
+            assert "mode" in entry, f"Version '{label}' missing 'mode' key"
+            assert entry["mode"] in valid_modes, (
+                f"Version '{label}' has invalid mode '{entry['mode']}'"
+            )
+
+    def test_v1_uses_tools(self):
+        assert SUMMARY_VERSIONS["v1-qwen3-coder"]["mode"] == "tools"
+
+    def test_v2_uses_json_schema(self):
+        assert SUMMARY_VERSIONS["v2-groq-gpt-oss"]["mode"] == "json_schema"
+
+
+class TestPydanticResponseModels:
+    """Test that Pydantic response models validate correctly."""
+
+    def test_cell_idea_minimal(self):
+        idea = CellIdea(cell_number=0, what="Test")
+        assert idea.cell_number == 0
+        assert idea.what == "Test"
+        assert idea.why == ""
+        assert idea.how == ""
+        assert idea.symbol == ""
+
+    def test_cell_idea_full(self):
+        idea = CellIdea(
+            cell_number=5, what="What", why="Why",
+            how="How", symbol="SYM",
+        )
+        assert idea.symbol == "SYM"
+
+    def test_cell_batch_response_round_trip(self):
+        """Model serializes to JSON and back."""
+        resp = CellBatchResponse(
+            ideas=[CellIdea(cell_number=0, what="Test")],
+            continuation="ctx",
+        )
+        data = json.loads(resp.model_dump_json())
+        restored = CellBatchResponse(**data)
+        assert len(restored.ideas) == 1
+        assert restored.continuation == "ctx"
+
+    def test_notebook_summary_response_round_trip(self):
+        resp = NotebookSummaryResponse(
+            what="W", why="Y", how="H",
+        )
+        data = json.loads(resp.model_dump_json())
+        restored = NotebookSummaryResponse(**data)
+        assert restored.what == "W"
+        assert restored.why == "Y"
+        assert restored.how == "H"
