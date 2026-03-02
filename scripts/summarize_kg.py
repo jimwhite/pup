@@ -57,6 +57,7 @@ from typing import Callable
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from openai import LengthFinishReasonError
 from pydantic import BaseModel, Field
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ SUMMARY_VERSIONS: dict[str, dict] = {
         "model": "openai/gpt-oss-120b",
         "prompts": "v3",
         "mode": "json_schema",
+        "max_tokens": 16384,
         "description": "Groq API with gpt-oss-120b, structured JSON output",
     },
 }
@@ -1345,7 +1347,27 @@ async def _cached_json_call(
 
     async with sem:
         t0 = time.monotonic()
-        response = await structured_llm.ainvoke(prompt)
+        try:
+            response = await structured_llm.ainvoke(prompt)
+        except LengthFinishReasonError as exc:
+            elapsed = time.monotonic() - t0
+            usage = getattr(exc, 'completion', None)
+            usage_info = ""
+            if usage:
+                u = getattr(usage, 'usage', None)
+                if u:
+                    usage_info = (
+                        f" (completion={u.completion_tokens}, "
+                        f"prompt={u.prompt_tokens}, "
+                        f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
+                    )
+            log.warning(
+                "<<< Structured response TRUNCATED (%.1fs)%s — "
+                "model hit max_tokens before completing JSON. "
+                "Consider increasing max_tokens or reducing batch size.",
+                elapsed, usage_info,
+            )
+            raise
         elapsed = time.monotonic() - t0
 
     log.debug("<<< Structured response (%.1fs): %s",
@@ -2873,11 +2895,15 @@ async def async_main(args: argparse.Namespace) -> int:
 
     llm: ChatOpenAI | None = None
     if not args.dry_run:
-        llm = ChatOpenAI(
-            base_url=args.base_url,
-            api_key=args.api_key,
-            model=model or "local-model",
-        )
+        max_tokens = version_cfg.get("max_tokens")
+        llm_kwargs: dict = {
+            "base_url": args.base_url,
+            "api_key": args.api_key,
+            "model": model or "local-model",
+        }
+        if max_tokens:
+            llm_kwargs["max_tokens"] = max_tokens
+        llm = ChatOpenAI(**llm_kwargs)
         log.info(
             "LLM: model=%s, base_url=%s, version=%s, mode=%s",
             model, args.base_url, version_label, output_mode,
