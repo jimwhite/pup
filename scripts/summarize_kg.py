@@ -1421,15 +1421,33 @@ def _cached_json_call(
                         f"prompt={u.prompt_tokens}, "
                         f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
                     )
-            log.warning(
-                "<<< Structured response TRUNCATED (%.1fs)%s — "
-                "model hit max_tokens before completing JSON. "
-                "Consider increasing max_tokens or reducing batch size.",
-                elapsed, usage_info,
-            )
-            raise
+            if attempt < max_retries:
+                log.warning(
+                    "<<< Structured response TRUNCATED (attempt %d/%d, %.1fs)%s "
+                    "— model hit max_tokens, retrying.",
+                    attempt, max_retries, elapsed, usage_info,
+                )
+                should_retry = True
+            else:
+                log.error(
+                    "<<< Structured response TRUNCATED after %d attempts (%.1fs)%s "
+                    "— skipping. Consider increasing max_tokens or reducing batch size.",
+                    max_retries, elapsed, usage_info,
+                )
+                return None, False
         except OutputParserException as exc:
             elapsed = time.monotonic() - t0
+            # Try to salvage JSON from the raw LLM output before retrying.
+            raw_output = getattr(exc, 'llm_output', None) or str(exc)
+            salvaged = _salvage_json(raw_output)
+            if isinstance(salvaged, dict):
+                log.warning(
+                    "<<< LangChain structured parse failed (%.1fs) — "
+                    "salvaged %d-char response.",
+                    elapsed, len(raw_output),
+                )
+                response = salvaged
+                break
             if attempt < max_retries:
                 log.warning(
                     "<<< LangChain structured parse failed "
@@ -1438,7 +1456,12 @@ def _cached_json_call(
                 )
                 should_retry = True
             else:
-                raise
+                log.error(
+                    "<<< LangChain structured parse failed after %d attempts "
+                    "(%.1fs) — skipping. Error: %s",
+                    max_retries, elapsed, exc,
+                )
+                return None, False
         except OpenAIError as exc:
             elapsed = time.monotonic() - t0
             err_body = getattr(exc, 'body', None) or {}
@@ -1460,7 +1483,7 @@ def _cached_json_call(
                     )
                     response = salvaged
                     break  # exit retry loop with salvaged dict
-                # Could not parse — retry if attempts remain.
+                # Could not salvage — retry if attempts remain.
                 if attempt < max_retries:
                     log.warning(
                         "<<< JSON validation failed (attempt %d/%d, %.1fs) "
@@ -1470,9 +1493,25 @@ def _cached_json_call(
                     )
                     should_retry = True
                 else:
-                    raise
+                    log.error(
+                        "<<< JSON validation failed after %d attempts "
+                        "(%.1fs) — skipping. Preview: %s...",
+                        max_retries, elapsed, failed_gen[:200],
+                    )
+                    return None, False
             else:
-                raise
+                if attempt < max_retries:
+                    log.warning(
+                        "<<< OpenAI API error (attempt %d/%d, %.1fs) — retrying. Error: %s",
+                        attempt, max_retries, elapsed, exc,
+                    )
+                    should_retry = True
+                else:
+                    log.error(
+                        "<<< OpenAI API error after %d attempts (%.1fs) — skipping. Error: %s",
+                        max_retries, elapsed, exc,
+                    )
+                    return None, False
         else:
             elapsed = time.monotonic() - t0
 
@@ -2102,6 +2141,9 @@ def summarize_notebooks(
             resp, _ = _cached_json_call(
                 prompt, structured_llm, model, cache,
             )
+            if resp is None:
+                log.warning("_invoke_summary: LLM call failed, returning empty summary.")
+                return SummaryResult()
             return _json_response_to_result(resp)
         else:
             tcs, _ = _cached_tool_call(
@@ -2400,6 +2442,9 @@ def summarize_directories(
             resp, _ = _cached_json_call(
                 prompt, structured_llm, model, cache,
             )
+            if resp is None:
+                log.warning("_invoke_summary: LLM call failed, returning empty summary.")
+                return SummaryResult()
             return _json_response_to_result(resp)
         else:
             tcs, _ = _cached_tool_call(

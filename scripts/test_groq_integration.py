@@ -465,6 +465,7 @@ def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | dict:
     response, was_cached = _cached_json_call(
         prompt, structured_llm, model, cache=None,
     )
+    assert response is not None, "_cached_json_call returned None — LLM call failed, check logs"
 
     print(f"\nCached: {was_cached}")
     print(f"Response type: {type(response).__name__}")
@@ -543,13 +544,10 @@ def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
     structured_llm = llm.with_structured_output(
         CellBatchResponse, method="json_schema", strict=True,
     )
-    try:
-        response, was_cached = _cached_json_call(
-            prompt, structured_llm, model, cache=None,
-        )
-    except Exception as exc:
-        print(f"\n✗ Basetypes batch FAILED with {type(exc).__name__}: {exc}")
-        raise
+    response, was_cached = _cached_json_call(
+        prompt, structured_llm, model, cache=None,
+    )
+    assert response is not None, "_cached_json_call returned None — LLM call failed, check logs"
 
     print(f"\nCached: {was_cached}")
     print(f"Response type: {type(response).__name__}")
@@ -605,6 +603,7 @@ def test_notebook_summary(
     response, was_cached = _cached_json_call(
         prompt, structured_llm, model, cache=None,
     )
+    assert response is not None, "_cached_json_call returned None — LLM call failed, check logs"
 
     result = _json_response_to_result(response)
 

@@ -326,12 +326,7 @@ class TestToolCallsToSummaries:
 class TestCachedToolCall:
     """Test _cached_tool_call with mocked LLM."""
 
-    @pytest.fixture
-    def sem(self):
-        return asyncio.Semaphore(1)
-
-    @pytest.mark.asyncio
-    async def test_single_shot_returns_tool_calls(self, sem) -> None:
+    def test_single_shot_returns_tool_calls(self) -> None:
         """Single-shot mode (tool_response_fn=None) returns tool calls."""
         from summarize_kg import _cached_tool_call
 
@@ -339,20 +334,19 @@ class TestCachedToolCall:
         mock_response.tool_calls = [
             {"name": "ReportWhat", "args": {"cell_number": 1, "summary": "X"}, "id": "tc1"},
         ]
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = mock_response
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        tool_calls, was_cached = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", None, sem,
+        tool_calls, was_cached = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", None,
         )
 
         assert len(tool_calls) == 1
         assert tool_calls[0]["name"] == "ReportWhat"
         assert was_cached is False
-        mock_llm.ainvoke.assert_called_once()
+        mock_llm.invoke.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_multi_turn_accumulates_calls(self, sem) -> None:
+    def test_multi_turn_accumulates_calls(self) -> None:
         """Multi-turn mode accumulates tool calls across turns."""
         from summarize_kg import _cached_tool_call
 
@@ -371,25 +365,24 @@ class TestCachedToolCall:
         resp3 = MagicMock()
         resp3.tool_calls = []
 
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.side_effect = [resp1, resp2, resp3]
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [resp1, resp2, resp3]
 
         progress_fn = lambda all_tcs, turn_tcs: [
             f"{len(all_tcs)} calls so far" for _ in turn_tcs
         ]
 
-        tool_calls, was_cached = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", None, sem,
+        tool_calls, was_cached = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", None,
             tool_response_fn=progress_fn,
         )
 
         assert len(tool_calls) == 3
         assert tool_calls[0]["name"] == "ReportWhat"
         assert tool_calls[2]["name"] == "ReportWhat"
-        assert mock_llm.ainvoke.call_count == 3
+        assert mock_llm.invoke.call_count == 3
 
-    @pytest.mark.asyncio
-    async def test_multi_turn_respects_max_turns(self, sem) -> None:
+    def test_multi_turn_respects_max_turns(self) -> None:
         """Multi-turn stops at max_turns even if model keeps calling tools."""
         from summarize_kg import _cached_tool_call
 
@@ -403,25 +396,24 @@ class TestCachedToolCall:
             ]
             return r
 
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.side_effect = [make_resp() for _ in range(20)]
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [make_resp() for _ in range(20)]
 
         progress_fn = lambda all_tcs, turn_tcs: [
             "progress" for _ in turn_tcs
         ]
 
-        tool_calls, _ = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", None, sem,
+        tool_calls, _ = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", None,
             tool_response_fn=progress_fn,
             max_turns=3,
         )
 
         # Should have 3 tool calls (1 per turn, 3 turns)
         assert len(tool_calls) == 3
-        assert mock_llm.ainvoke.call_count == 3
+        assert mock_llm.invoke.call_count == 3
 
-    @pytest.mark.asyncio
-    async def test_multi_turn_stall_detection(self, sem) -> None:
+    def test_multi_turn_stall_detection(self) -> None:
         """Multi-turn breaks after 2 consecutive duplicate-only turns."""
         from summarize_kg import _cached_tool_call
 
@@ -433,15 +425,15 @@ class TestCachedToolCall:
             ]
             return r
 
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.side_effect = [make_resp() for _ in range(20)]
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [make_resp() for _ in range(20)]
 
         progress_fn = lambda all_tcs, turn_tcs: [
             "progress" for _ in turn_tcs
         ]
 
-        tool_calls, _ = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", None, sem,
+        tool_calls, _ = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", None,
             tool_response_fn=progress_fn,
             max_turns=10,
         )
@@ -449,10 +441,9 @@ class TestCachedToolCall:
         # Turn 1: new call (cell 1). Turn 2: dup (stall=1). Turn 3: dup (stall=2 → break).
         # So we get calls from turns 1 and 2 = 2 total, and 3 invocations.
         assert len(tool_calls) == 2
-        assert mock_llm.ainvoke.call_count == 3
+        assert mock_llm.invoke.call_count == 3
 
-    @pytest.mark.asyncio
-    async def test_cache_hit(self, sem) -> None:
+    def test_cache_hit(self) -> None:
         """Cached results are returned without invoking the LLM."""
         from summarize_kg import _cached_tool_call
 
@@ -460,18 +451,17 @@ class TestCachedToolCall:
         mock_cache = MagicMock()
         mock_cache.get.return_value = json.dumps(cached_data)
 
-        mock_llm = AsyncMock()
+        mock_llm = MagicMock()
 
-        tool_calls, was_cached = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", mock_cache, sem,
+        tool_calls, was_cached = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", mock_cache,
         )
 
         assert was_cached is True
         assert tool_calls == cached_data
-        mock_llm.ainvoke.assert_not_called()
+        mock_llm.invoke.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_cache_miss_stores_result(self, sem) -> None:
+    def test_cache_miss_stores_result(self) -> None:
         """Cache miss invokes LLM and stores the result."""
         from summarize_kg import _cached_tool_call
 
@@ -482,11 +472,11 @@ class TestCachedToolCall:
         mock_response.tool_calls = [
             {"name": "ReportWhat", "args": {"cell_number": 1, "summary": "W"}, "id": "tc1"},
         ]
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = mock_response
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        tool_calls, was_cached = await _cached_tool_call(
-            "test prompt", mock_llm, "test-model", mock_cache, sem,
+        tool_calls, was_cached = _cached_tool_call(
+            "test prompt", mock_llm, "test-model", mock_cache,
         )
 
         assert was_cached is False
@@ -494,19 +484,18 @@ class TestCachedToolCall:
         stored = json.loads(mock_cache.put.call_args[0][1])
         assert stored[0]["name"] == "ReportWhat"
 
-    @pytest.mark.asyncio
-    async def test_no_tool_calls_returns_empty(self, sem) -> None:
+    def test_no_tool_calls_returns_empty(self) -> None:
         """If model returns no tool calls, result is empty list."""
         from summarize_kg import _cached_tool_call
 
         mock_response = MagicMock()
         mock_response.tool_calls = []
 
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = mock_response
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        tool_calls, was_cached = await _cached_tool_call(
-            "prompt", mock_llm, "model", None, sem,
+        tool_calls, was_cached = _cached_tool_call(
+            "prompt", mock_llm, "model", None,
         )
 
         assert tool_calls == []
