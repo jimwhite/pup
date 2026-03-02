@@ -34,6 +34,8 @@ from summarize_kg import (
     _json_response_to_result,
     _load_prompt_templates,
     _render_prompt,
+    _sanitize_for_filename,
+    _build_worker_argv,
 )
 
 
@@ -1148,3 +1150,159 @@ class TestPydanticResponseModels:
         assert restored.what == "W"
         assert restored.why == "Y"
         assert restored.how == "H"
+
+# ── _sanitize_for_filename ─────────────────────────────────────────
+
+
+class TestSanitizeForFilename:
+    def test_safe_chars_unchanged(self):
+        assert _sanitize_for_filename("books_std-lists") == "books_std-lists"
+
+    def test_slash_replaced(self):
+        result = _sanitize_for_filename("books/std/lists")
+        assert "/" not in result
+        assert result == "books_std_lists"
+
+    def test_dots_replaced(self):
+        result = _sanitize_for_filename("books/centaur/fty.lisp")
+        assert "." not in result
+        assert "/" not in result
+
+    def test_empty_string(self):
+        assert _sanitize_for_filename("") == ""
+
+    def test_truncated_to_80(self):
+        long = "a" * 100
+        result = _sanitize_for_filename(long)
+        assert len(result) == 80
+
+    def test_exactly_80_unchanged(self):
+        s = "a" * 80
+        assert _sanitize_for_filename(s) == s
+
+    def test_spaces_replaced(self):
+        result = _sanitize_for_filename("hello world")
+        assert " " not in result
+        assert result == "hello_world"
+
+    def test_unicode_replaced(self):
+        result = _sanitize_for_filename("books/\u2500\u2500\u2500")
+        assert all(c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                   for c in result)
+
+
+# ── _build_worker_argv ─────────────────────────────────────────────
+
+
+class TestBuildWorkerArgv:
+    """Test _build_worker_argv output for correctness and completeness."""
+
+    @staticmethod
+    def _fake_args(**overrides):
+        """Return a minimal argparse-like Namespace for _build_worker_argv."""
+        import argparse
+        defaults = dict(
+            scope="all",
+            version="v1-qwen3-coder",
+            batch_size=200,
+            context_size=8192,
+            weaviate_host="host.docker.internal",
+            port=8080,
+            grpc_port=50051,
+            ollama_url="http://host.docker.internal:11434",
+            embed_model="nomic-embed-text:latest",
+            base_url="http://host.docker.internal:1234/v1",
+            api_key="lm-studio",
+            model=None,
+            cache_path="scripts/.llm_cache.sqlite",
+            no_cache=False,
+            restart=False,
+            verbose=False,
+        )
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    def test_python_executable_first(self):
+        import sys
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std/lists", "/tmp/chk.json")
+        assert argv[0] == sys.executable
+
+    def test_source_dir_and_no_recurse(self):
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std/lists", "/tmp/chk.json")
+        assert "--source-dir" in argv
+        idx = argv.index("--source-dir")
+        assert argv[idx + 1] == "books/std/lists"
+        assert "--no-recurse" in argv
+
+    def test_jobs_forced_to_1(self):
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "-j" in argv
+        idx = argv.index("-j")
+        assert argv[idx + 1] == "1"
+
+    def test_checkpoint_forwarded(self):
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std", "/tmp/worker_chk.json")
+        assert "--checkpoint" in argv
+        idx = argv.index("--checkpoint")
+        assert argv[idx + 1] == "/tmp/worker_chk.json"
+
+    def test_scope_forwarded(self):
+        args = self._fake_args(scope="cell")
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--scope" in argv
+        idx = argv.index("--scope")
+        assert argv[idx + 1] == "cell"
+
+    def test_model_included_when_set(self):
+        args = self._fake_args(model="my-model")
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--model" in argv
+        idx = argv.index("--model")
+        assert argv[idx + 1] == "my-model"
+
+    def test_model_omitted_when_none(self):
+        args = self._fake_args(model=None)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--model" not in argv
+
+    def test_no_cache_flag_included(self):
+        args = self._fake_args(no_cache=True)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--no-cache" in argv
+
+    def test_no_cache_flag_omitted_when_false(self):
+        args = self._fake_args(no_cache=False)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--no-cache" not in argv
+
+    def test_verbose_flag(self):
+        args = self._fake_args(verbose=True)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--verbose" in argv
+
+    def test_restart_flag(self):
+        args = self._fake_args(restart=True)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--restart" in argv
+
+    def test_overwrite_not_forwarded(self):
+        """--overwrite must not appear — it's handled by the parent process."""
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--overwrite" not in argv
+
+    def test_recreate_not_forwarded(self):
+        args = self._fake_args()
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        assert "--recreate" not in argv
+
+    def test_all_values_are_strings(self):
+        """Every element of the returned argv must be a str."""
+        args = self._fake_args(batch_size=100, context_size=4096, port=9090)
+        argv = _build_worker_argv(args, "books/std", "/tmp/chk.json")
+        for item in argv:
+            assert isinstance(item, str), f"Non-string in argv: {item!r}"

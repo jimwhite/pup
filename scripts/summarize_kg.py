@@ -33,6 +33,8 @@ import logging
 import os
 import re
 import sqlite3
+import concurrent.futures
+import subprocess
 import sys
 import time
 import urllib.request
@@ -779,6 +781,7 @@ class LLMCache:
         if self._conn is None:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS llm_cache (
                     prompt_hash TEXT PRIMARY KEY,
@@ -2421,7 +2424,12 @@ def summarize_directories(
     version: str = "",
     mode: str = "tools",
 ) -> dict[str, SummaryResult]:
-    """Phase 3: Bottom-up directory summaries."""
+    """Phase 3: Per-directory summaries based on notebooks directly in each directory.
+
+    Each directory that contains at least one notebook gets its own summary.
+    Subdirectory summaries are not collected into parent directories — each
+    directory is summarised independently from its own notebooks only.
+    """
     summary_coll = client.collections.get(COLLECTION_SUMMARY) if not dry_run else None
 
     # Build the LLM wrapper once (tools or structured output).
@@ -2452,20 +2460,13 @@ def summarize_directories(
             )
             return _summary_tools_to_result(tcs)
 
-    # Build directory tree: dir → list of notebook sources in that dir (non-recursive).
+    # Build directory → notebooks mapping (non-recursive: only direct parent).
     dir_notebooks: dict[str, list[str]] = defaultdict(list)
-    all_dirs: set[str] = set()
     for src in notebook_sources:
-        d = str(Path(src).parent)
-        dir_notebooks[d].append(src)
-        # Register all ancestor directories up to "books".
-        parts = Path(d).parts
-        for i in range(len(parts)):
-            ancestor = str(Path(*parts[:i + 1]))
-            all_dirs.add(ancestor)
+        dir_notebooks[str(Path(src).parent)].append(src)
 
-    # Sort directories bottom-up (longest paths first = deepest first).
-    sorted_dirs = sorted(all_dirs, key=lambda d: d.count("/"), reverse=True)
+    # Only summarise directories that directly contain at least one notebook.
+    sorted_dirs = sorted(dir_notebooks.keys())
 
     dir_summaries: dict[str, SummaryResult] = {}
     total_done = 0
@@ -2496,17 +2497,6 @@ def summarize_directories(
                     entry += f"\n  how: {s.how}"
                 contents_parts.append(entry)
 
-        # Child directory summaries.
-        for child_dir, child_sum in dir_summaries.items():
-            if str(Path(child_dir).parent) == directory:
-                entry = f"Subdirectory: {Path(child_dir).name}/"
-                if child_sum.what:
-                    entry += f"\n  what: {child_sum.what}"
-                if child_sum.why:
-                    entry += f"\n  why: {child_sum.why}"
-                if child_sum.how:
-                    entry += f"\n  how: {child_sum.how}"
-                contents_parts.append(entry)
 
         if not contents_parts:
             log.debug("No content for directory %s, skipping", directory)
@@ -2902,13 +2892,8 @@ def _dry_run_report(
     """Print a summary of what would be processed."""
     total_cells = sum(len(v) for v in cell_summaries.values())
 
-    # Directory count.
-    all_dirs: set[str] = set()
-    for src in notebook_sources:
-        d = str(Path(src).parent)
-        parts = Path(d).parts
-        for i in range(len(parts)):
-            all_dirs.add(str(Path(*parts[:i + 1])))
+    # Directory count — only directories that directly contain notebooks.
+    all_dirs: set[str] = {str(Path(src).parent) for src in notebook_sources}
 
     print("\n=== DRY-RUN SUMMARY ===")
     print(f"Notebooks:            {len(notebook_sources)}")
@@ -2931,6 +2916,59 @@ def _dry_run_report(
 
 
 # ─── CLI + main ──────────────────────────────────────────────────────
+
+
+def _sanitize_for_filename(s: str) -> str:
+    """Convert an arbitrary string to a safe filename component.
+
+    Replaces any character that is not alphanumeric, ``-``, or ``_`` with
+    ``_``, and truncates to 80 characters.
+    """
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", s)[:80]
+
+
+def _build_worker_argv(
+    args: argparse.Namespace,
+    directory: str,
+    worker_checkpoint: str,
+) -> list[str]:
+    """Build ``sys.argv`` for a per-directory worker subprocess.
+
+    The worker runs the full pipeline for *directory* (with
+    ``--no-recurse``) using its own checkpoint file.  Flags that were
+    already handled by the parent process (``--recreate``,
+    ``--overwrite``, ``--clear-cache``) are intentionally omitted so
+    they are not applied twice.
+    """
+    argv = [sys.executable, os.path.abspath(sys.argv[0])]
+    # Restrict to this single directory.
+    argv += ["--source-dir", directory, "--no-recurse"]
+    # Each worker gets its own checkpoint so they don't race.
+    argv += ["--checkpoint", worker_checkpoint]
+    # Workers are always single-process to avoid recursive fan-out.
+    argv += ["-j", "1"]
+    # Forward all other pipeline options.
+    argv += ["--scope", args.scope]
+    argv += ["--version", args.version]
+    argv += ["--batch-size", str(args.batch_size)]
+    argv += ["--context-size", str(args.context_size)]
+    argv += ["--weaviate-host", args.weaviate_host]
+    argv += ["--port", str(args.port)]
+    argv += ["--grpc-port", str(args.grpc_port)]
+    argv += ["--ollama-url", args.ollama_url]
+    argv += ["--embed-model", args.embed_model]
+    argv += ["--base-url", args.base_url]
+    argv += ["--api-key", args.api_key]
+    if args.model:
+        argv += ["--model", args.model]
+    argv += ["--cache-path", args.cache_path]
+    if args.no_cache:
+        argv += ["--no-cache"]
+    if args.restart:
+        argv += ["--restart"]
+    if args.verbose:
+        argv += ["--verbose"]
+    return argv
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3242,6 +3280,71 @@ def sync_main(args: argparse.Namespace) -> int:
                         dirs_cp.remove(d)
             log.info("Overwrite: deleted %d Weaviate objects, cleared checkpoint",
                      total_deleted)
+
+        # ── Parallel dispatch ──────────────────────────────────────────
+        # When --jobs > 1, partition notebooks by their immediate parent
+        # directory and spawn one subprocess per directory (up to --jobs
+        # running concurrently).  Each worker runs the full pipeline
+        # (Phases 1-3) for its directory using its own checkpoint file.
+        # Overwrite and cache-clearing were already handled above.
+        if args.jobs > 1 and not args.dry_run:
+            dir_to_sources: dict[str, list[str]] = defaultdict(list)
+            for src in notebook_sources:
+                dir_to_sources[str(Path(src).parent)].append(src)
+            directories = sorted(dir_to_sources.keys())
+
+            if len(directories) > 1:
+                log.info(
+                    "Parallel mode: %d directories, up to %d concurrent workers",
+                    len(directories), args.jobs,
+                )
+                chk_stem = (
+                    args.checkpoint[:-5]
+                    if args.checkpoint.endswith(".json")
+                    else args.checkpoint
+                )
+
+                failed: list[str] = []
+
+                def _run_one(directory: str) -> tuple[str, int]:
+                    san = _sanitize_for_filename(directory)
+                    worker_chk = f"{chk_stem}_worker_{san}.json"
+                    argv = _build_worker_argv(args, directory, worker_chk)
+                    log.info("Worker start: %s", directory)
+                    proc = subprocess.run(argv)
+                    return directory, proc.returncode
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=args.jobs,
+                ) as executor:
+                    fut_map = {
+                        executor.submit(_run_one, d): d
+                        for d in directories
+                    }
+                    for future in concurrent.futures.as_completed(fut_map):
+                        d, rc = future.result()
+                        if rc != 0:
+                            log.error(
+                                "Worker for %s exited with code %d", d, rc
+                            )
+                            failed.append(d)
+                        else:
+                            log.info("Worker done: %s", d)
+
+                if failed:
+                    log.error(
+                        "%d worker(s) failed: %s", len(failed), failed
+                    )
+                else:
+                    log.info(
+                        "All %d workers completed successfully",
+                        len(directories),
+                    )
+                return 1 if failed else 0
+            else:
+                log.info(
+                    "Parallel mode: only 1 directory, running single-process"
+                )
 
         run_cell = args.scope in ("all", "cell")
         run_notebook = args.scope in ("all", "notebook")
