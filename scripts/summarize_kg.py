@@ -58,6 +58,7 @@ from typing import Callable
 from langchain_openai import ChatOpenAI
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.utils.json import parse_json_markdown
 from openai import LengthFinishReasonError, OpenAIError
 from pydantic import BaseModel, Field
 
@@ -77,6 +78,7 @@ DEFAULT_LM_STUDIO_URL = "http://host.docker.internal:1234/v1"
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_JOBS = 4
 DEFAULT_CACHE_PATH = "scripts/.llm_cache.sqlite"
+RECOVERY_FILE = "scripts/.salvage_recovery.jsonl"
 CHECKPOINT_FILE = "scripts/.summarize_checkpoint.json"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -717,6 +719,51 @@ class NotebookSummaryResponse(BaseModel):
         description="Usage instructions — include-book path, key functions/macros, "
         "and typical invocation patterns.  2-4 sentences.",
     )
+
+
+def _salvage_json(raw: str) -> dict | str:
+    """Try to extract a JSON object from *raw*, tolerating noise.
+
+    Returns the parsed dict on success, or *raw* unchanged on failure.
+    """
+    try:
+        return parse_json_markdown(raw)
+    except Exception:
+        return raw
+
+
+def _save_recovery_record(
+    notebook: str,
+    batch_cell_indices: set[int],
+    response: dict,
+    reason: str = "multi_cell_missing_cell_number",
+) -> None:
+    """Append a salvaged-but-unresolvable response to the recovery file.
+
+    Each line is a self-contained JSON object with enough context to
+    let a human (or future script) assign the correct cell_number to
+    each idea and re-ingest.
+    """
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "notebook": notebook,
+        "batch_cell_indices": sorted(batch_cell_indices),
+        "reason": reason,
+        "response": response,
+    }
+    try:
+        with open(RECOVERY_FILE, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        log.info(
+            "  %s: saved salvaged response (%d ideas, cells %s) "
+            "to %s for manual recovery",
+            notebook,
+            len(response.get("ideas", [])),
+            sorted(batch_cell_indices),
+            RECOVERY_FILE,
+        )
+    except OSError as exc:
+        log.warning("Could not write recovery record: %s", exc)
 
 
 # ─── LLM Call Memoization (SQLite) ──────────────────────────────────
@@ -1404,17 +1451,31 @@ async def _cached_json_call(
                     err_body.get('error', {}).get('code', '')
                     if isinstance(err_body, dict) else ''
                 )
-                if err_code == 'json_validate_failed' and attempt < max_retries:
-                    failed = (
-                        err_body.get('error', {}).get('failed_generation', '')[:200]
+                if err_code == 'json_validate_failed':
+                    failed_gen = (
+                        err_body.get('error', {}).get('failed_generation', '')
                         if isinstance(err_body, dict) else ''
                     )
-                    log.warning(
-                        "<<< JSON validation failed (attempt %d/%d, %.1fs) — retrying. "
-                        "Preview: %s...",
-                        attempt, max_retries, elapsed, failed,
-                    )
-                    should_retry = True
+                    salvaged = _salvage_json(failed_gen)
+                    if isinstance(salvaged, dict):
+                        log.warning(
+                            "<<< JSON validation failed (%.1fs) — "
+                            "salvaged %d-char response.",
+                            elapsed, len(failed_gen),
+                        )
+                        response = salvaged
+                        break  # exit retry loop with salvaged dict
+                    # Could not parse — retry if attempts remain.
+                    if attempt < max_retries:
+                        log.warning(
+                            "<<< JSON validation failed (attempt %d/%d, %.1fs) "
+                            "— could not salvage, retrying. Preview: %s...",
+                            attempt, max_retries, elapsed,
+                            failed_gen[:200],
+                        )
+                        should_retry = True
+                    else:
+                        raise
                 else:
                     raise
             else:
@@ -1515,13 +1576,44 @@ def _tool_calls_to_summaries(
 
 def _json_response_to_summaries(
     response: CellBatchResponse | dict,
+    batch_cell_indices: set[int] | None = None,
 ) -> tuple[dict[int, list[SummaryResult]], str]:
     """Convert a CellBatchResponse into per-cell SummaryResult lists.
 
     Mirrors ``_tool_calls_to_summaries`` but for json_schema responses.
     Each ``CellIdea`` becomes one ``SummaryResult``.
+
+    When *batch_cell_indices* is provided and an idea is missing its
+    ``cell_number`` (e.g. from a salvaged ``json_validate_failed``
+    response), the idea is assigned to the sole cell in the batch if
+    there is exactly one, otherwise assigned ``-1`` (which the caller's
+    hallucinated-index filter will discard with a warning).
     """
     if isinstance(response, dict):
+        # Salvaged JSON may have ideas missing cell_number.
+        missing = [
+            idea for idea in response.get("ideas", [])
+            if isinstance(idea, dict) and "cell_number" not in idea
+        ]
+        if missing:
+            if batch_cell_indices and len(batch_cell_indices) == 1:
+                # Single-cell batch: we know the answer.
+                default_cell = next(iter(batch_cell_indices))
+                for idea in missing:
+                    idea["cell_number"] = default_cell
+            else:
+                # Multi-cell batch: save for recovery, then
+                # assign -1 so the hallucinated-index filter
+                # removes them (but they're persisted on disk).
+                _save_recovery_record(
+                    notebook=response.get("_notebook", "unknown"),
+                    batch_cell_indices=batch_cell_indices or set(),
+                    response=response,
+                )
+                for idea in missing:
+                    idea["cell_number"] = -1
+        # Remove internal tag before Pydantic validation.
+        response.pop("_notebook", None)
         response = CellBatchResponse(**response)
 
     summaries: dict[int, list[SummaryResult]] = {}
@@ -1826,35 +1918,23 @@ async def summarize_cells(
                     return responses
                 return fn
 
-            if mode == "json_schema":
+            try:
+              if mode == "json_schema":
                 # Single-shot structured JSON call — no multi-turn.
-                try:
-                    response, was_cached = await _cached_json_call(
-                        prompt, structured_llm, model, cache, sem,
-                    )
-                except (OpenAIError, OutputParserException) as exc:
-                    err_body = getattr(exc, 'body', None) or {}
-                    err_code = (
-                        err_body.get('error', {}).get('code', '')
-                        if isinstance(err_body, dict) else ''
-                    )
-                    log.warning(
-                        "  %s: LLM call failed after retries "
-                        "(cells %d–%d, %s) — skipping batch. Error: %s",
-                        nb_src,
-                        min(batch_indices), max(batch_indices),
-                        err_code or type(exc).__name__,
-                        str(exc)[:300],
-                    )
-                    continue
+                response, was_cached = await _cached_json_call(
+                    prompt, structured_llm, model, cache, sem,
+                )
                 if was_cached:
                     total_cached += 1
                 else:
                     total_llm += 1
+                # Tag the dict so _save_recovery_record knows the notebook.
+                if isinstance(response, dict):
+                    response["_notebook"] = nb_src
                 summaries, continuation_context = (
-                    _json_response_to_summaries(response)
+                    _json_response_to_summaries(response, batch_indices)
                 )
-            else:
+              else:
                 tool_calls, was_cached = await _cached_tool_call(
                     prompt, llm_with_tools, model, cache, sem,
                     tool_response_fn=_make_progress_fn(),
@@ -1867,10 +1947,10 @@ async def summarize_cells(
                     tool_calls,
                 )
 
-            # Filter out hallucinated cell indices the LLM may have
-            # invented (i.e. indices not present in this batch).
-            bad_indices = set(summaries.keys()) - batch_indices
-            if bad_indices:
+              # Filter out hallucinated cell indices the LLM may have
+              # invented (i.e. indices not present in this batch).
+              bad_indices = set(summaries.keys()) - batch_indices
+              if bad_indices:
                 log.warning(
                     "  %s: LLM returned %d invalid cell indices "
                     "(not in batch): %s — skipping",
@@ -1879,16 +1959,16 @@ async def summarize_cells(
                 for bi in bad_indices:
                     del summaries[bi]
 
-            # Track which cells received summaries for progress.
-            summarized_cell_indices.update(summaries.keys())
+              # Track which cells received summaries for progress.
+              summarized_cell_indices.update(summaries.keys())
 
-            # Merge into notebook results.
-            for cell_idx, sum_list in summaries.items():
+              # Merge into notebook results.
+              for cell_idx, sum_list in summaries.items():
                 for si, summary in enumerate(sum_list):
                     nb_results.append((cell_idx, si, summary))
 
-            # Upsert to Weaviate.
-            if summary_coll is not None and summaries:
+              # Upsert to Weaviate.
+              if summary_coll is not None and summaries:
                 upsert_items: list[dict] = []
                 for cell_idx, sum_list in summaries.items():
                     cell_rec = next(
@@ -1950,8 +2030,19 @@ async def summarize_cells(
                             references=item["references"],
                         )
 
-            # Mark batch in checkpoint.
-            checkpoint.setdefault("cell_batches", set()).add(batch_key)
+              # Mark batch in checkpoint.
+              checkpoint.setdefault("cell_batches", set()).add(batch_key)
+
+            except Exception as exc:
+                log.warning(
+                    "  %s: batch failed (cells %d–%d, %s) — "
+                    "skipping batch. Error: %s",
+                    nb_src,
+                    min(batch_indices), max(batch_indices),
+                    type(exc).__name__,
+                    str(exc)[:300],
+                )
+                continue
 
         # Mark entire notebook as done so we can fast-skip on restart.
         checkpoint.setdefault("cell_batches", set()).add(f"nb_done:{nb_src}")

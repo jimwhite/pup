@@ -7,6 +7,7 @@ data/
 scripts/.ingest_checkpoint.json
 scripts/.summarize_checkpoint.json
 scripts/.llm_cache.sqlite
+scripts/.salvage_recovery.jsonl
 scripts/*-log*.txt
 scripts/summarize_groq_*.txt
 .vscode/alive/
