@@ -27,7 +27,6 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
-import asyncio
 import hashlib
 import json
 import logging
@@ -1241,12 +1240,11 @@ def _batch_cells_by_size(
     return batches
 
 
-async def _cached_tool_call(
+def _cached_tool_call(
     prompt: str,
     llm_with_tools,
     model: str,
     cache: LLMCache | None,
-    sem: asyncio.Semaphore,
     tool_response_fn: (
         Callable[[list[dict], list[dict]], list[str]] | None
     ) = None,
@@ -1264,7 +1262,7 @@ async def _cached_tool_call(
     and must return a list of strings — one response per turn call.
 
     When *tool_response_fn* is ``None``, behaves as single-shot
-    (one ``ainvoke``, collect tool calls, done).
+    (one ``invoke``, collect tool calls, done).
 
     Returns ``(tool_calls, was_cached)`` where *tool_calls* is a list
     of dicts: ``[{"name": ..., "args": {...}}, ...]``.
@@ -1283,86 +1281,85 @@ async def _cached_tool_call(
 
     stall_count = 0  # consecutive turns with no new unique tool calls
 
-    async with sem:
-        for turn in range(max_turns):
-            t0 = time.monotonic()
-            response = await llm_with_tools.ainvoke(messages)
-            elapsed = time.monotonic() - t0
+    for turn in range(max_turns):
+        t0 = time.monotonic()
+        response = llm_with_tools.invoke(messages)
+        elapsed = time.monotonic() - t0
 
-            if not response.tool_calls:
-                # Log any trailing text content from the model.
-                tail = getattr(response, "content", "") or ""
-                log.debug(
-                    "<<< AIMessage turn %d (%.1fs, 0 tool calls)%s",
-                    turn + 1, elapsed,
-                    f": {tail[:200]}" if tail.strip() else "",
-                )
-                break  # Model is done — no more tool calls.
-
-            # Collect this turn's tool calls.
-            turn_calls = [
-                {"name": tc["name"], "args": tc["args"]}
-                for tc in response.tool_calls
-            ]
-
-            # Detect stalling: if every call in this turn is an
-            # exact duplicate of something already collected, the
-            # model is stuck in a loop.  Break after 2 consecutive
-            # stalled turns to be generous.
-            existing = {
-                (tc["name"], json.dumps(tc["args"], sort_keys=True))
-                for tc in all_tool_calls
-            }
-            new_calls = [
-                tc for tc in turn_calls
-                if (tc["name"], json.dumps(tc["args"], sort_keys=True))
-                not in existing
-            ]
-            if not new_calls:
-                stall_count += 1
-                if stall_count >= 2:
-                    log.debug(
-                        "<<< AIMessage turn %d (%.1fs): stalled %d turns "
-                        "with only duplicate calls — stopping multi-turn",
-                        turn + 1, elapsed, stall_count,
-                    )
-                    break
-            else:
-                stall_count = 0
-
-            all_tool_calls.extend(turn_calls)
-
-            # Log every tool call from this turn.
+        if not response.tool_calls:
+            # Log any trailing text content from the model.
+            tail = getattr(response, "content", "") or ""
             log.debug(
-                "<<< AIMessage turn %d (%.1fs, %d tool calls, %d total):",
-                turn + 1, elapsed, len(turn_calls), len(all_tool_calls),
+                "<<< AIMessage turn %d (%.1fs, 0 tool calls)%s",
+                turn + 1, elapsed,
+                f": {tail[:200]}" if tail.strip() else "",
             )
-            for tc in turn_calls:
-                args_str = json.dumps(tc["args"], ensure_ascii=False)
-                if len(args_str) > 300:
-                    args_str = args_str[:300] + "..."
-                log.debug("    tool: %s(%s)", tc["name"], args_str)
+            break  # Model is done — no more tool calls.
 
-            # Single-shot mode: one turn only.
-            if tool_response_fn is None:
-                break
+        # Collect this turn's tool calls.
+        turn_calls = [
+            {"name": tc["name"], "args": tc["args"]}
+            for tc in response.tool_calls
+        ]
 
-            # Multi-turn: append AIMessage + ToolMessages so the
-            # model can continue.
-            messages.append(response)  # The AIMessage with tool_calls.
-
-            responses = tool_response_fn(all_tool_calls, turn_calls)
-            for i, tc in enumerate(response.tool_calls):
-                content = (
-                    responses[i] if i < len(responses) else "Recorded."
+        # Detect stalling: if every call in this turn is an
+        # exact duplicate of something already collected, the
+        # model is stuck in a loop.  Break after 2 consecutive
+        # stalled turns to be generous.
+        existing = {
+            (tc["name"], json.dumps(tc["args"], sort_keys=True))
+            for tc in all_tool_calls
+        }
+        new_calls = [
+            tc for tc in turn_calls
+            if (tc["name"], json.dumps(tc["args"], sort_keys=True))
+            not in existing
+        ]
+        if not new_calls:
+            stall_count += 1
+            if stall_count >= 2:
+                log.debug(
+                    "<<< AIMessage turn %d (%.1fs): stalled %d turns "
+                    "with only duplicate calls — stopping multi-turn",
+                    turn + 1, elapsed, stall_count,
                 )
-                messages.append(ToolMessage(
-                    content=content,
-                    tool_call_id=tc["id"],
-                ))
+                break
+        else:
+            stall_count = 0
 
-            for i, r in enumerate(responses):
-                log.debug(">>> ToolMessage[%d]: %s", i, r)
+        all_tool_calls.extend(turn_calls)
+
+        # Log every tool call from this turn.
+        log.debug(
+            "<<< AIMessage turn %d (%.1fs, %d tool calls, %d total):",
+            turn + 1, elapsed, len(turn_calls), len(all_tool_calls),
+        )
+        for tc in turn_calls:
+            args_str = json.dumps(tc["args"], ensure_ascii=False)
+            if len(args_str) > 300:
+                args_str = args_str[:300] + "..."
+            log.debug("    tool: %s(%s)", tc["name"], args_str)
+
+        # Single-shot mode: one turn only.
+        if tool_response_fn is None:
+            break
+
+        # Multi-turn: append AIMessage + ToolMessages so the
+        # model can continue.
+        messages.append(response)  # The AIMessage with tool_calls.
+
+        responses = tool_response_fn(all_tool_calls, turn_calls)
+        for i, tc in enumerate(response.tool_calls):
+            content = (
+                responses[i] if i < len(responses) else "Recorded."
+            )
+            messages.append(ToolMessage(
+                content=content,
+                tool_call_id=tc["id"],
+            ))
+
+        for i, r in enumerate(responses):
+            log.debug(">>> ToolMessage[%d]: %s", i, r)
 
     if cache is not None:
         cache.put(prompt, json.dumps(all_tool_calls), model)
@@ -1370,18 +1367,17 @@ async def _cached_tool_call(
     return all_tool_calls, False
 
 
-async def _cached_json_call(
+def _cached_json_call(
     prompt: str,
     structured_llm,
     model: str,
     cache: LLMCache | None,
-    sem: asyncio.Semaphore,
 ) -> tuple[BaseModel, bool]:
     """Invoke an LLM with structured output (json_schema) and caching.
 
-    Unlike ``_cached_tool_call``, this is single-shot — one ``ainvoke``,
-    one response.  The model returns a validated Pydantic object directly
-    because ``with_structured_output`` handles parsing.
+    Single-shot: one ``invoke``, one response.  The model returns a
+    validated Pydantic object directly because ``with_structured_output``
+    handles parsing.
 
     Returns ``(response_model, was_cached)`` where *response_model* is
     a Pydantic ``BaseModel`` instance (e.g. CellBatchResponse or
@@ -1410,80 +1406,78 @@ async def _cached_json_call(
     response = None
     for attempt in range(1, max_retries + 1):
         should_retry = False
-        async with sem:
-            t0 = time.monotonic()
-            try:
-                response = await structured_llm.ainvoke(prompt)
-            except LengthFinishReasonError as exc:
-                elapsed = time.monotonic() - t0
-                usage = getattr(exc, 'completion', None)
-                usage_info = ""
-                if usage:
-                    u = getattr(usage, 'usage', None)
-                    if u:
-                        usage_info = (
-                            f" (completion={u.completion_tokens}, "
-                            f"prompt={u.prompt_tokens}, "
-                            f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
-                        )
+        t0 = time.monotonic()
+        try:
+            response = structured_llm.invoke(prompt)
+        except LengthFinishReasonError as exc:
+            elapsed = time.monotonic() - t0
+            usage = getattr(exc, 'completion', None)
+            usage_info = ""
+            if usage:
+                u = getattr(usage, 'usage', None)
+                if u:
+                    usage_info = (
+                        f" (completion={u.completion_tokens}, "
+                        f"prompt={u.prompt_tokens}, "
+                        f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
+                    )
+            log.warning(
+                "<<< Structured response TRUNCATED (%.1fs)%s — "
+                "model hit max_tokens before completing JSON. "
+                "Consider increasing max_tokens or reducing batch size.",
+                elapsed, usage_info,
+            )
+            raise
+        except OutputParserException as exc:
+            elapsed = time.monotonic() - t0
+            if attempt < max_retries:
                 log.warning(
-                    "<<< Structured response TRUNCATED (%.1fs)%s — "
-                    "model hit max_tokens before completing JSON. "
-                    "Consider increasing max_tokens or reducing batch size.",
-                    elapsed, usage_info,
+                    "<<< LangChain structured parse failed "
+                    "(attempt %d/%d, %.1fs) — retrying. Error: %s",
+                    attempt, max_retries, elapsed, exc,
                 )
+                should_retry = True
+            else:
                 raise
-            except OutputParserException as exc:
-                elapsed = time.monotonic() - t0
+        except OpenAIError as exc:
+            elapsed = time.monotonic() - t0
+            err_body = getattr(exc, 'body', None) or {}
+            err_code = (
+                err_body.get('error', {}).get('code', '')
+                if isinstance(err_body, dict) else ''
+            )
+            if err_code == 'json_validate_failed':
+                failed_gen = (
+                    err_body.get('error', {}).get('failed_generation', '')
+                    if isinstance(err_body, dict) else ''
+                )
+                salvaged = _salvage_json(failed_gen)
+                if isinstance(salvaged, dict):
+                    log.warning(
+                        "<<< JSON validation failed (%.1fs) — "
+                        "salvaged %d-char response.",
+                        elapsed, len(failed_gen),
+                    )
+                    response = salvaged
+                    break  # exit retry loop with salvaged dict
+                # Could not parse — retry if attempts remain.
                 if attempt < max_retries:
                     log.warning(
-                        "<<< LangChain structured parse failed "
-                        "(attempt %d/%d, %.1fs) — retrying. Error: %s",
-                        attempt, max_retries, elapsed, exc,
+                        "<<< JSON validation failed (attempt %d/%d, %.1fs) "
+                        "— could not salvage, retrying. Preview: %s...",
+                        attempt, max_retries, elapsed,
+                        failed_gen[:200],
                     )
                     should_retry = True
                 else:
                     raise
-            except OpenAIError as exc:
-                elapsed = time.monotonic() - t0
-                err_body = getattr(exc, 'body', None) or {}
-                err_code = (
-                    err_body.get('error', {}).get('code', '')
-                    if isinstance(err_body, dict) else ''
-                )
-                if err_code == 'json_validate_failed':
-                    failed_gen = (
-                        err_body.get('error', {}).get('failed_generation', '')
-                        if isinstance(err_body, dict) else ''
-                    )
-                    salvaged = _salvage_json(failed_gen)
-                    if isinstance(salvaged, dict):
-                        log.warning(
-                            "<<< JSON validation failed (%.1fs) — "
-                            "salvaged %d-char response.",
-                            elapsed, len(failed_gen),
-                        )
-                        response = salvaged
-                        break  # exit retry loop with salvaged dict
-                    # Could not parse — retry if attempts remain.
-                    if attempt < max_retries:
-                        log.warning(
-                            "<<< JSON validation failed (attempt %d/%d, %.1fs) "
-                            "— could not salvage, retrying. Preview: %s...",
-                            attempt, max_retries, elapsed,
-                            failed_gen[:200],
-                        )
-                        should_retry = True
-                    else:
-                        raise
-                else:
-                    raise
             else:
-                elapsed = time.monotonic() - t0
+                raise
+        else:
+            elapsed = time.monotonic() - t0
 
-        # Retry outside the semaphore so we don't hold it during sleep.
         if should_retry:
-            await asyncio.sleep(1.0 * attempt)
+            time.sleep(1.0 * attempt)
             continue
         break  # success
 
@@ -1646,13 +1640,12 @@ def _json_response_to_result(
     )
 
 
-async def summarize_cells(
+def summarize_cells(
     client: weaviate.WeaviateClient,
     notebook_sources: list[str],
     llm: ChatOpenAI,
     model: str,
     cache: LLMCache | None,
-    sem: asyncio.Semaphore,
     batch_size: int,
     checkpoint: dict,
     context_size: int = DEFAULT_CONTEXT_SIZE,
@@ -1921,8 +1914,8 @@ async def summarize_cells(
             try:
               if mode == "json_schema":
                 # Single-shot structured JSON call — no multi-turn.
-                response, was_cached = await _cached_json_call(
-                    prompt, structured_llm, model, cache, sem,
+                response, was_cached = _cached_json_call(
+                    prompt, structured_llm, model, cache,
                 )
                 if was_cached:
                     total_cached += 1
@@ -1935,8 +1928,8 @@ async def summarize_cells(
                     _json_response_to_summaries(response, batch_indices)
                 )
               else:
-                tool_calls, was_cached = await _cached_tool_call(
-                    prompt, llm_with_tools, model, cache, sem,
+                tool_calls, was_cached = _cached_tool_call(
+                    prompt, llm_with_tools, model, cache,
                     tool_response_fn=_make_progress_fn(),
                 )
                 if was_cached:
@@ -2069,14 +2062,13 @@ async def summarize_cells(
 # ─── Phase 2: Notebook Summaries ─────────────────────────────────────
 
 
-async def summarize_notebooks(
+def summarize_notebooks(
     client: weaviate.WeaviateClient,
     notebook_sources: list[str],
     cell_summaries: dict[str, list[tuple[int, int, SummaryResult]]],
     llm: ChatOpenAI,
     model: str,
     cache: LLMCache | None,
-    sem: asyncio.Semaphore,
     batch_size: int,
     checkpoint: dict,
     dry_run: bool = False,
@@ -2104,16 +2096,16 @@ async def summarize_notebooks(
         llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS) if llm else None
         structured_llm = None
 
-    async def _invoke_summary(prompt: str) -> SummaryResult:
+    def _invoke_summary(prompt: str) -> SummaryResult:
         """Call the LLM in the appropriate mode and return SummaryResult."""
         if mode == "json_schema":
-            resp, _ = await _cached_json_call(
-                prompt, structured_llm, model, cache, sem,
+            resp, _ = _cached_json_call(
+                prompt, structured_llm, model, cache,
             )
             return _json_response_to_result(resp)
         else:
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
+            tcs, _ = _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache,
             )
             return _summary_tools_to_result(tcs)
 
@@ -2157,7 +2149,7 @@ async def summarize_notebooks(
                 topic_section=_format_topic_section(nb_src),
                 cell_summaries=cell_text,
             )
-            intermediates.append(await _invoke_summary(prompt))
+            intermediates.append(_invoke_summary(prompt))
 
         # Reduce: combine intermediates (or use directly if only one chunk).
         if len(intermediates) == 1:
@@ -2182,7 +2174,7 @@ async def summarize_notebooks(
                         topic_section=_format_topic_section(nb_src),
                         section_summaries=rc_text,
                     )
-                    new_intermediates.append(await _invoke_summary(prompt))
+                    new_intermediates.append(_invoke_summary(prompt))
                 intermediates = new_intermediates
                 section_text = _format_intermediates(intermediates)
 
@@ -2194,7 +2186,7 @@ async def summarize_notebooks(
                 topic_section=_format_topic_section(nb_src),
                 section_summaries=section_text,
             )
-            final = await _invoke_summary(prompt)
+            final = _invoke_summary(prompt)
 
         nb_summaries[nb_src] = final
 
@@ -2372,14 +2364,13 @@ def _format_intermediates(intermediates: list[SummaryResult]) -> str:
 # ─── Phase 3: Directory Summaries ────────────────────────────────────
 
 
-async def summarize_directories(
+def summarize_directories(
     client: weaviate.WeaviateClient,
     notebook_sources: list[str],
     nb_summaries: dict[str, SummaryResult],
     llm: ChatOpenAI,
     model: str,
     cache: LLMCache | None,
-    sem: asyncio.Semaphore,
     batch_size: int,
     checkpoint: dict,
     dry_run: bool = False,
@@ -2403,16 +2394,16 @@ async def summarize_directories(
         llm_with_summary_tools = llm.bind_tools(SUMMARY_TOOLS) if llm else None
         structured_llm = None
 
-    async def _invoke_summary(prompt: str) -> SummaryResult:
+    def _invoke_summary(prompt: str) -> SummaryResult:
         """Call the LLM in the appropriate mode and return SummaryResult."""
         if mode == "json_schema":
-            resp, _ = await _cached_json_call(
-                prompt, structured_llm, model, cache, sem,
+            resp, _ = _cached_json_call(
+                prompt, structured_llm, model, cache,
             )
             return _json_response_to_result(resp)
         else:
-            tcs, _ = await _cached_tool_call(
-                prompt, llm_with_summary_tools, model, cache, sem,
+            tcs, _ = _cached_tool_call(
+                prompt, llm_with_summary_tools, model, cache,
             )
             return _summary_tools_to_result(tcs)
 
@@ -2495,7 +2486,7 @@ async def summarize_directories(
                 topic_section=dir_topic,
                 contents="\n\n".join(content_chunks[0]),
             )
-            final = await _invoke_summary(prompt)
+            final = _invoke_summary(prompt)
         else:
             # Multi-pass: summarize each chunk, then reduce.
             chunk_results: list[SummaryResult] = []
@@ -2508,7 +2499,7 @@ async def summarize_directories(
                     topic_section=dir_topic,
                     contents="\n\n".join(cc),
                 )
-                chunk_results.append(await _invoke_summary(prompt))
+                chunk_results.append(_invoke_summary(prompt))
             # Final reduce over chunk results.
             section_text = _format_intermediates(chunk_results)
             prompt = _render_prompt(
@@ -2519,7 +2510,7 @@ async def summarize_directories(
                 topic_section=dir_topic,
                 contents=section_text,
             )
-            final = await _invoke_summary(prompt)
+            final = _invoke_summary(prompt)
         dir_summaries[directory] = final
 
         # Upsert to Weaviate.
@@ -3015,8 +3006,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-async def async_main(args: argparse.Namespace) -> int:
-    """Async entry point — runs the summarization pipeline."""
+def sync_main(args: argparse.Namespace) -> int:
+    """Entry point — runs the summarization pipeline."""
 
     # ── LLM cache setup ──────────────────────────────────────────────
     cache: LLMCache | None = None
@@ -3088,7 +3079,6 @@ async def async_main(args: argparse.Namespace) -> int:
             model, base_url, version_label, output_mode,
         )
 
-    sem = asyncio.Semaphore(args.jobs)
 
     # ── Checkpoint ───────────────────────────────────────────────────
     if args.restart:
@@ -3216,8 +3206,8 @@ async def async_main(args: argparse.Namespace) -> int:
         cell_summaries: dict[str, list[tuple[int, int, SummaryResult]]] = {}
         if run_cell:
             log.info("=== Phase 1: Cell Summaries ===")
-            cell_summaries = await summarize_cells(
-                client, notebook_sources, llm, model, cache, sem,
+            cell_summaries = summarize_cells(
+                client, notebook_sources, llm, model, cache,
                 args.batch_size, checkpoint,
                 context_size=args.context_size,
                 dry_run=args.dry_run,
@@ -3230,9 +3220,9 @@ async def async_main(args: argparse.Namespace) -> int:
         nb_summaries: dict[str, SummaryResult] = {}
         if run_notebook:
             log.info("=== Phase 2: Notebook Summaries ===")
-            nb_summaries = await summarize_notebooks(
+            nb_summaries = summarize_notebooks(
                 client, notebook_sources, cell_summaries,
-                llm, model, cache, sem,
+                llm, model, cache,
                 args.batch_size, checkpoint, args.dry_run,
                 context_size=args.context_size,
                 jinja_env=jinja_env,
@@ -3243,9 +3233,9 @@ async def async_main(args: argparse.Namespace) -> int:
         # ── Phase 3: Directory summaries ─────────────────────────────
         if run_directory:
             log.info("=== Phase 3: Directory Summaries ===")
-            await summarize_directories(
+            summarize_directories(
                 client, notebook_sources, nb_summaries,
-                llm, model, cache, sem,
+                llm, model, cache,
                 args.batch_size, checkpoint, args.dry_run,
                 context_size=args.context_size,
                 jinja_env=jinja_env,
@@ -3291,7 +3281,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    return asyncio.run(async_main(args))
+    return sync_main(args)
 
 
 if __name__ == "__main__":

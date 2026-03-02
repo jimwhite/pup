@@ -16,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -36,6 +35,7 @@ from summarize_kg import (
     _json_response_to_summaries,
     _load_prompt_templates,
     _render_prompt,
+    _salvage_json,
     BATCH_CELL_PROMPT,
     NOTEBOOK_CHUNK_PROMPT,
     _format_topic_section,
@@ -449,7 +449,7 @@ def _build_notebook_prompt(cell_summaries: list[str]) -> str:
     )
 
 
-async def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | dict:
+def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | dict:
     """Test Phase 1: cell batch → CellBatchResponse."""
     print("\n" + "=" * 60)
     print("TEST 1: Cell Batch → CellBatchResponse")
@@ -462,10 +462,8 @@ async def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | di
     structured_llm = llm.with_structured_output(
         CellBatchResponse, method="json_schema", strict=True,
     )
-    sem = asyncio.Semaphore(1)
-
-    response, was_cached = await _cached_json_call(
-        prompt, structured_llm, model, cache=None, sem=sem,
+    response, was_cached = _cached_json_call(
+        prompt, structured_llm, model, cache=None,
     )
 
     print(f"\nCached: {was_cached}")
@@ -532,7 +530,7 @@ async def test_cell_batch(llm: ChatOpenAI, model: str) -> CellBatchResponse | di
     return response
 
 
-async def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
+def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
     """Test the basetypes.lisp batch that triggers json_validate_failed."""
     print("\n" + "=" * 60)
     print("TEST 1b: Basetypes Batch (json_validate_failed reproducer)")
@@ -545,11 +543,9 @@ async def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
     structured_llm = llm.with_structured_output(
         CellBatchResponse, method="json_schema", strict=True,
     )
-    sem = asyncio.Semaphore(1)
-
     try:
-        response, was_cached = await _cached_json_call(
-            prompt, structured_llm, model, cache=None, sem=sem,
+        response, was_cached = _cached_json_call(
+            prompt, structured_llm, model, cache=None,
         )
     except Exception as exc:
         print(f"\n✗ Basetypes batch FAILED with {type(exc).__name__}: {exc}")
@@ -576,7 +572,7 @@ async def test_basetypes_batch(llm: ChatOpenAI, model: str) -> None:
     print("\n✓ Basetypes batch test PASSED")
 
 
-async def test_notebook_summary(
+def test_notebook_summary(
     llm: ChatOpenAI, model: str,
     cell_response: CellBatchResponse | dict,
 ) -> None:
@@ -605,10 +601,9 @@ async def test_notebook_summary(
     structured_llm = llm.with_structured_output(
         NotebookSummaryResponse, method="json_schema", strict=True,
     )
-    sem = asyncio.Semaphore(1)
 
-    response, was_cached = await _cached_json_call(
-        prompt, structured_llm, model, cache=None, sem=sem,
+    response, was_cached = _cached_json_call(
+        prompt, structured_llm, model, cache=None,
     )
 
     result = _json_response_to_result(response)
@@ -622,7 +617,78 @@ async def test_notebook_summary(
     print("\n✓ Notebook summary test PASSED")
 
 
-async def run_all():
+def test_phase2_salvage():
+    """Test that _salvage_json recovers valid JSON from a real Phase 2 crash.
+
+    This uses the exact failed_generation from the batch-3 crash in
+    scripts/summarize-all-log-v3-r3.txt.  The LLM returned valid JSON
+    but the Groq API rejected it with json_validate_failed.  Our
+    salvage path should parse the JSON and _json_response_to_result
+    should convert it into a SummaryResult with non-empty fields.
+    """
+    print("\n" + "=" * 60)
+    print("TEST: Phase 2 salvage (real crash data)")
+    print("=" * 60)
+
+    # Exact failed_generation from batch 3 crash (arithmetic-5 normalization book)
+    failed_generation = (
+        '{"what":"This file defines a suite of normalization facilities for'
+        " algebraic terms, including the function"
+        " normalize-terms-such-as-a/a+b-+-b/a+b-fn that handles fractions"
+        " with a common denominator, distribute-* for multiplying numeric"
+        " operands, and normalize-terms-such-as-1/ax+bx-fn which extracts a"
+        " common factor from a sum before taking the reciprocal.  It also"
+        " introduces helper predicates and search functions such as"
+        " find-matching-addend and find-matching-factor-gather-exponents for"
+        " locating subterms that can be rewritten, and theorems like"
+        " distribute-*-distributes-1, distribute-*-distributes-2,"
+        " normalize-terms-such-as-a/a+b-+-b/a+b,"
+        " normalize-terms-such-as-1/ax+bx, and normalize-addends that"
+        ' formalize these transformations.",'
+        '"why":"These constructions provide the algebraic backbone needed for'
+        " simplifying rational expressions during ACL2 proofs.  By"
+        " normalizing sums and products of fractions into canonical forms,"
+        " subsequent reasoning steps (e.g., cancellation, common-denominator"
+        " combination) become straightforward rewrites rather than ad-hoc"
+        " manipulations.  The file therefore underpins the arithmetic-5"
+        " library\\u2019s ability to handle non-trivial rational-arithmetic"
+        ' goals automatically.",'
+        '"how":"To use these facilities, first include the support book with'
+        " (include-book \\\"../../support/top\\\").  The main entry points are"
+        " the rules normalize-terms-such-as-a/a+b-+-b/a+b,"
+        " normalize-terms-such-as-1/ax+bx, and normalize-addends, which fire"
+        " automatically via :rewrite rules when their left-hand side patterns"
+        " match a goal.  If finer control is needed, individual helpers such"
+        " as distribute-* or find-matching-addend can be enabled or disabled"
+        " selectively.  Because the rules depend on meta-level predicates"
+        " (e.g., proveably-non-zero), users should ensure that relevant"
+        " type-prescription or linear-arithmetic lemmas are available in the"
+        ' current theory."}'
+    )
+
+    # Step 1: _salvage_json should parse the raw JSON string
+    salvaged = _salvage_json(failed_generation)
+    assert salvaged is not None, "_salvage_json returned None on real crash data"
+    assert isinstance(salvaged, dict), f"Expected dict, got {type(salvaged)}"
+    for key in ("what", "why", "how"):
+        assert key in salvaged, f"Missing key {key!r} in salvaged dict"
+        assert salvaged[key], f"Empty value for key {key!r}"
+    print(f"  _salvage_json returned dict with keys: {sorted(salvaged.keys())}")
+
+    # Step 2: _json_response_to_result should convert it to a SummaryResult
+    result = _json_response_to_result(salvaged)
+    assert isinstance(result, SummaryResult), f"Expected SummaryResult, got {type(result)}"
+    assert result.what, "SummaryResult.what is empty"
+    assert result.why, "SummaryResult.why is empty"
+    assert result.how, "SummaryResult.how is empty"
+    print(f"  SummaryResult.what: {result.what[:80]}...")
+    print(f"  SummaryResult.why:  {result.why[:80]}...")
+    print(f"  SummaryResult.how:  {result.how[:80]}...")
+
+    print("\n✓ Phase 2 salvage test PASSED")
+
+
+def run_all():
     """Run all integration tests."""
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
@@ -658,9 +724,10 @@ async def run_all():
     print(f"Max tokens: {max_tokens}")
     print(f"Cells: {len(SAMPLE_CELLS)}")
 
-    cell_response = await test_cell_batch(llm, model)
-    await test_basetypes_batch(llm, model)
-    await test_notebook_summary(llm, model, cell_response)
+    cell_response = test_cell_batch(llm, model)
+    test_basetypes_batch(llm, model)
+    test_notebook_summary(llm, model, cell_response)
+    test_phase2_salvage()
 
     print("\n" + "=" * 60)
     print("ALL INTEGRATION TESTS PASSED")
@@ -677,7 +744,7 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    asyncio.run(run_all())
+    run_all()
 
 
 if __name__ == "__main__":
