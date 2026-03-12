@@ -17,7 +17,7 @@
         "ACL2_LISP": "sbcl",
         "ACL2": "/home/acl2/saved_acl2",
         "ACL2_HOME": "/home/acl2",
-        "ACL2_SYSTEM_BOOKS": "/home/acl2/books"        
+        "ACL2_SYSTEM_BOOKS": "/home/acl2/books"
     },
     "remoteEnv": {
         "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
@@ -57,6 +57,17 @@
                         "args": [],
                         "env": {
                             "WEAVIATE_HOST": "host.docker.internal"
+                        }
+                    },
+                    "jupyter": {
+                        "command": "uvx",
+                        "args": [
+                            "jupyter-mcp-server@latest"
+                        ],
+                        "env": {
+                            "JUPYTER_URL": "http://localhost:8888",
+                            "JUPYTER_TOKEN": "MY_TOKEN",
+                            "ALLOW_IMG_OUTPUT": "true"
                         }
                     }
                 }
