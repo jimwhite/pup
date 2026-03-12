@@ -11,19 +11,19 @@ objects into three Weaviate v4 collections:
   * **ACL2Symbol**   — one object per unique PACKAGE::NAME with a
                        dependency graph via cross-references
 
-Deterministic UUID5 keys make the import idempotent.  A JSON checkpoint
-file makes it restartable — only notebooks that have changed or not yet
-been processed are re-ingested.
+Deterministic UUID5 keys make the import idempotent — every run
+processes all notebooks and upserts everything, so transient failures
+(e.g. Ollama vectorization hiccups) are self-healing on the next run.
 
 Usage examples::
 
     # Dry-run: parse and report, don't write to Weaviate
     python scripts/ingest_notebooks.py --dry-run
 
-    # Full import from scratch
+    # Full import from scratch (drop and rebuild collections)
     python scripts/ingest_notebooks.py --recreate
 
-    # Incremental update (skips checkpointed notebooks)
+    # Incremental upsert (idempotent, fills any gaps)
     python scripts/ingest_notebooks.py
 
     # Include execution outputs (stdout, execute_result) — omitted by default
@@ -52,6 +52,7 @@ from weaviate.classes.config import (
     Property,
     ReferenceProperty,
 )
+from weaviate.classes.aggregate import GroupByAggregate
 from weaviate.util import generate_uuid5
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -82,9 +83,12 @@ DEFAULT_WEAVIATE_PORT = 8080
 DEFAULT_WEAVIATE_GRPC_PORT = 50051
 DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text:latest"
+
+# nomic-embed-text has an 8192-token context window (~4 chars/token).
+# Text longer than this must be chunked and embedded manually.
+MAX_VECTORIZER_CHARS = 1_000
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_JOBS = min(multiprocessing.cpu_count(), 8)
-CHECKPOINT_FILE = "scripts/.ingest_checkpoint.json"
 
 log = logging.getLogger("ingest-notebooks")
 
@@ -362,21 +366,75 @@ def find_notebooks(source_dir: Path) -> list[Path]:
     return notebooks
 
 
-# ─── Checkpoint ──────────────────────────────────────────────────────
+# ─── Batch retry ─────────────────────────────────────────────────────
 
 
-def _load_checkpoint(path: str) -> dict:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+def _retry_failed_objects(
+    collection,
+    failed: list,
+    entity_name: str = "object",
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> int:
+    """Retry failed batch objects individually with backoff.
 
+    When Weaviate's ``text2vec-ollama`` vectorizer is temporarily
+    unavailable (or overwhelmed), entire sub-batches of objects are
+    silently dropped.  This function retries each failed object one at
+    a time so that a transient Ollama hiccup doesn't permanently lose
+    data.
 
-def _save_checkpoint(path: str, data: dict) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    Returns the count of *permanently* failed objects (after all
+    retries are exhausted).
+    """
+    if not failed:
+        return 0
+
+    log.warning("  %d %s(s) failed in batch — retrying individually",
+                len(failed), entity_name)
+
+    remaining = list(failed)
+    for attempt in range(1, max_retries + 1):
+        if not remaining:
+            return 0
+
+        if attempt > 1:
+            delay = retry_delay * attempt
+            log.info("  Retry attempt %d/%d (after %.0fs delay)...",
+                     attempt, max_retries, delay)
+            time.sleep(delay)
+
+        still_failed = []
+        for fail_obj in remaining:
+            try:
+                obj = fail_obj.object_
+                insert_kwargs: dict = {
+                    "properties": obj.properties,
+                    "uuid": obj.uuid,
+                }
+                if obj.references:
+                    insert_kwargs["references"] = obj.references
+                collection.data.insert(**insert_kwargs)
+            except Exception as exc:
+                still_failed.append(fail_obj)
+                log.debug("  Retry insert failed for %s: %s",
+                          getattr(obj, 'uuid', '?'), exc)
+
+        recovered = len(remaining) - len(still_failed)
+        if recovered:
+            log.info("  Attempt %d: recovered %d/%d %s(s)",
+                     attempt, recovered, len(remaining), entity_name)
+        remaining = still_failed
+
+    if remaining:
+        log.error("  %d %s(s) permanently failed after %d retries:",
+                  len(remaining), entity_name, max_retries)
+        for fail_obj in remaining:
+            msg = getattr(fail_obj, 'message', str(fail_obj))
+            uuid = getattr(getattr(fail_obj, 'object_', None), 'uuid', '?')
+            log.error("    UUID %s: %s", uuid, msg)
+
+    return len(remaining)
 
 
 # ─── Schema creation ────────────────────────────────────────────────
@@ -594,11 +652,9 @@ def _upsert_notebooks(
 
     failed = collection.batch.failed_objects
     elapsed = time.time() - t0
-    log.info("  Notebooks done: %d in %.1fs (%d failed)",
+    log.info("  Notebooks done: %d in %.1fs (%d failed in batch)",
              len(notebooks), elapsed, len(failed))
-    if failed:
-        for obj in failed[:5]:
-            log.error("  Failed notebook: %s", obj)
+    _retry_failed_objects(collection, failed, "notebook")
 
 
 def _collect_global_symbols(notebooks: list[NotebookInfo]) -> dict[str, SymbolInfo]:
@@ -654,11 +710,43 @@ def _upsert_symbols(
 
     failed = collection.batch.failed_objects
     elapsed = time.time() - t0
-    log.info("  Symbols done: %d in %.1fs (%d failed)",
+    log.info("  Symbols done: %d in %.1fs (%d failed in batch)",
              len(global_syms), elapsed, len(failed))
-    if failed:
-        for obj in failed[:5]:
-            log.error("  Failed symbol: %s", obj)
+    _retry_failed_objects(collection, failed, "symbol")
+
+
+def _embed_chunked(
+    text: str,
+    ollama_url: str,
+    embed_model: str,
+    chunk_size: int = MAX_VECTORIZER_CHARS,
+) -> list[float]:
+    """Split *text* into chunks, embed each via Ollama, return the mean vector."""
+    import urllib.request
+
+    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+    all_vecs: list[list[float]] = []
+    for chunk in chunks:
+        body = json.dumps({"model": embed_model, "input": chunk}).encode()
+        req = urllib.request.Request(
+            f"{ollama_url}/api/embed",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+        all_vecs.append(data["embeddings"][0])
+
+    if len(all_vecs) == 1:
+        return all_vecs[0]
+    # Average across chunks.
+    dim = len(all_vecs[0])
+    avg = [0.0] * dim
+    for vec in all_vecs:
+        for j in range(dim):
+            avg[j] += vec[j]
+    n = len(all_vecs)
+    return [v / n for v in avg]
 
 
 def _upsert_cells(
@@ -666,6 +754,9 @@ def _upsert_cells(
     notebooks: list[NotebookInfo],
     batch_size: int,
     include_outputs: bool = False,
+    ollama_url: str = DEFAULT_OLLAMA_URL,
+    embed_model: str = DEFAULT_EMBED_MODEL,
+    max_embed_chars: int = MAX_VECTORIZER_CHARS,
 ) -> int:
     """Phase 3: upsert ACL2Cell objects with notebook cross-ref."""
     collection = client.collections.get(COLLECTION_CELL)
@@ -673,17 +764,21 @@ def _upsert_cells(
     log.info("Upserting %d cells across %d notebooks...", total_cells, len(notebooks))
     t0 = time.time()
     count = 0
+    oversized: list[tuple[dict, str, dict, str]] = []  # (props, uuid, refs, vector_name)
 
     with collection.batch.fixed_size(batch_size=batch_size) as batch:
         for nb_info in notebooks:
             nb_uuid = _notebook_uuid(nb_info.source_file)
             for ci in nb_info.cells:
+                comment = ci.source if ci.cell_type == "markdown" else ""
+                code = ci.source if ci.cell_type == "code" else ""
+
                 props: dict = {
                     "notebook_source": nb_info.source_file,
                     "cell_index": ci.cell_index,
                     "cell_type": ci.cell_type,
-                    "comment_text": ci.source if ci.cell_type == "markdown" else "",
-                    "code_text": ci.source if ci.cell_type == "code" else "",
+                    "comment_text": comment,
+                    "code_text": code,
                     "package": ci.package,
                     "execution_count": ci.execution_count,
                     "provenance_start": ci.provenance_start,
@@ -694,28 +789,59 @@ def _upsert_cells(
                     props["stdout"] = ci.stdout
                     props["execute_result"] = ci.execute_result
 
-                # Inline cross-ref to parent notebook.
                 refs: dict = {"belongsToNotebook": nb_uuid}
-
-                # Cross-ref to defined symbols.
                 if ci.defined_symbols:
                     refs["definesSymbols"] = [
                         _symbol_uuid(qn) for qn in ci.defined_symbols
                     ]
 
-                batch.add_object(
-                    properties=props,
-                    uuid=_cell_uuid(nb_info.source_file, ci.cell_index),
-                    references=refs,
-                )
+                cell_uid = _cell_uuid(nb_info.source_file, ci.cell_index)
+
+                # Check if text exceeds the vectorizer context limit.
+                vec_text = comment or code
+                if len(vec_text) > max_embed_chars:
+                    vec_name = "comment_vector" if comment else "code_vector"
+                    oversized.append((props, cell_uid, refs, vec_name))
+                    log.info("  Deferring oversized cell %s:%d "
+                             "(%d chars, will chunk-embed)",
+                             nb_info.source_file, ci.cell_index,
+                             len(vec_text))
+                else:
+                    batch.add_object(
+                        properties=props,
+                        uuid=cell_uid,
+                        references=refs,
+                    )
                 count += 1
 
     failed = collection.batch.failed_objects
     elapsed = time.time() - t0
-    log.info("  Cells done: %d in %.1fs (%d failed)", count, elapsed, len(failed))
-    if failed:
-        for obj in failed[:5]:
-            log.error("  Failed cell: %s", obj)
+    log.info("  Cells done: %d in %.1fs (%d failed in batch, %d oversized)",
+             count, elapsed, len(failed), len(oversized))
+    _retry_failed_objects(collection, failed, "cell")
+
+    # Insert oversized cells one-by-one with manually chunked embeddings.
+    if oversized:
+        log.info("  Embedding %d oversized cell(s) via chunked Ollama calls...",
+                 len(oversized))
+        for props, uid, refs, vec_name in oversized:
+            text = props.get("comment_text") or props.get("code_text")
+            try:
+                vec = _embed_chunked(text, ollama_url, embed_model,
+                                     chunk_size=max_embed_chars)
+                # Provide explicit vector; the other named vector stays empty.
+                other = "code_vector" if vec_name == "comment_vector" else "comment_vector"
+                collection.data.replace(
+                    properties=props,
+                    uuid=uid,
+                    references=refs,
+                    vector={vec_name: vec, other: [0.0] * len(vec)},
+                )
+                log.info("    Upserted oversized cell %s:%d OK",
+                         props["notebook_source"], props["cell_index"])
+            except Exception as exc:
+                log.error("    Failed to embed/insert oversized cell %s:%d: %s",
+                          props["notebook_source"], props["cell_index"], exc)
     return count
 
 
@@ -762,6 +888,37 @@ def _insert_symbol_cross_refs(
     if failed:
         for ref in failed[:5]:
             log.error("  Failed ref: %s", ref)
+
+
+# ─── Repair mode ─────────────────────────────────────────────────────
+
+
+def _find_notebooks_needing_repair(
+    client: weaviate.WeaviateClient,
+    parsed: list[NotebookInfo],
+) -> list[NotebookInfo]:
+    """Check each notebook's expected cell UUIDs against Weaviate and return those with missing cells."""
+    cells_col = client.collections.get("ACL2Cell")
+    needs_repair: list[NotebookInfo] = []
+
+    for nb in parsed:
+        missing = 0
+        for i in range(len(nb.cells)):
+            uid = _cell_uuid(nb.source_file, i)
+            if not cells_col.data.exists(uid):
+                missing += 1
+        if missing:
+            log.warning(
+                "REPAIR: %s — %d/%d cells missing",
+                nb.source_file, missing, len(nb.cells),
+            )
+            needs_repair.append(nb)
+
+    log.info(
+        "Repair scan: %d/%d notebooks need repair",
+        len(needs_repair), len(parsed),
+    )
+    return needs_repair
 
 
 # ─── Dry-run reporting ───────────────────────────────────────────────
@@ -838,12 +995,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Weaviate batch size (default: {DEFAULT_BATCH_SIZE})",
     )
     p.add_argument(
+        "--max-embed-chars", type=int, default=MAX_VECTORIZER_CHARS,
+        help=f"Max chars before chunked embedding (default: {MAX_VECTORIZER_CHARS})",
+    )
+    p.add_argument(
         "--recreate", action="store_true",
         help="Drop and recreate all collections",
     )
     p.add_argument(
-        "--force", action="store_true",
-        help="Ignore checkpoint, reprocess all notebooks",
+        "--repair", action="store_true",
+        help="Only re-ingest notebooks with missing cells in Weaviate",
     )
     p.add_argument(
         "--include-outputs", action="store_true",
@@ -856,10 +1017,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dry-run", action="store_true",
         help="Parse notebooks and report stats without writing to Weaviate",
-    )
-    p.add_argument(
-        "--checkpoint", default=CHECKPOINT_FILE,
-        help=f"Checkpoint file path (default: {CHECKPOINT_FILE})",
     )
     p.add_argument(
         "-v", "--verbose", action="store_true",
@@ -876,6 +1033,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Suppress per-request HTTP chatter from httpx/httpcore.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # ── Discovery ────────────────────────────────────────────────────
     source_dir = Path(args.source_dir)
@@ -891,27 +1051,10 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("No notebooks found, nothing to do")
         return 0
 
-    # ── Checkpoint filtering ─────────────────────────────────────────
-    checkpoint = {} if args.force or args.recreate else _load_checkpoint(args.checkpoint)
-    paths_to_process: list[Path] = []
-    for p in notebook_paths:
-        # Use mtime to decide staleness.
-        mtime = p.stat().st_mtime
-        cp_entry = checkpoint.get(str(p))
-        if cp_entry and cp_entry.get("mtime", 0) >= mtime:
-            log.debug("Skipping (checkpointed): %s", p)
-            continue
-        paths_to_process.append(p)
-
-    if not paths_to_process and not args.force and not args.recreate:
-        log.info("All %d notebooks already checkpointed, nothing to do "
-                 "(use --force to reprocess)", len(notebook_paths))
-        return 0
-
-    log.info("Processing %d notebooks (%d skipped via checkpoint)",
-             len(paths_to_process), len(notebook_paths) - len(paths_to_process))
+    log.info("Found %d notebooks", len(notebook_paths))
 
     # ── Parse (parallel) ─────────────────────────────────────────────
+    paths_to_process = notebook_paths
     jobs = max(1, args.jobs)
     log.info("Parsing %d notebooks with %d workers...",
              len(paths_to_process), jobs)
@@ -959,12 +1102,9 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Parsed %d notebooks in %.1fs (%.0f/s, %d errors)",
              len(parsed), elapsed, rate, errors)
 
-    # ── Collect global symbols ───────────────────────────────────────
-    global_syms = _collect_global_symbols(parsed)
-    log.info("Unique symbols: %d", len(global_syms))
-
-    # ── Dry run ──────────────────────────────────────────────────────
-    if args.dry_run:
+    # ── Dry run (no Weaviate needed) ───────────────────────────────
+    if args.dry_run and not args.repair:
+        global_syms = _collect_global_symbols(parsed)
         _dry_run_report(parsed, global_syms)
         return 0
 
@@ -987,6 +1127,23 @@ def main(argv: list[str] | None = None) -> int:
                            recreate=args.recreate,
                            include_outputs=args.include_outputs)
 
+        # ── Repair filtering ─────────────────────────────────────────
+        if args.repair and not args.recreate:
+            parsed = _find_notebooks_needing_repair(client, parsed)
+            if not parsed:
+                log.info("No notebooks need repair — all cell counts match")
+                return 0
+
+        # ── Dry run (after repair scan) ──────────────────────────────
+        if args.dry_run:
+            global_syms = _collect_global_symbols(parsed)
+            _dry_run_report(parsed, global_syms)
+            return 0
+
+        # ── Collect global symbols ───────────────────────────────────
+        global_syms = _collect_global_symbols(parsed)
+        log.info("Unique symbols: %d", len(global_syms))
+
         # ── Phase 1: Notebooks ───────────────────────────────────────
         _upsert_notebooks(client, parsed, args.batch_size)
 
@@ -994,23 +1151,12 @@ def main(argv: list[str] | None = None) -> int:
         _upsert_symbols(client, global_syms, args.batch_size)
 
         # ── Phase 3: Cells ───────────────────────────────────────────
-        _upsert_cells(client, parsed, args.batch_size, args.include_outputs)
+        _upsert_cells(client, parsed, args.batch_size, args.include_outputs,
+                       ollama_url=args.ollama_url, embed_model=args.embed_model,
+                       max_embed_chars=args.max_embed_chars)
 
         # ── Phase 4: Symbol cross-references ─────────────────────────
         _insert_symbol_cross_refs(client, global_syms, args.batch_size)
-
-        # ── Update checkpoint ────────────────────────────────────────
-        for nb_info in parsed:
-            checkpoint[str(nb_info.path)] = {
-                "source_file": nb_info.source_file,
-                "notebook_uuid": _notebook_uuid(nb_info.source_file),
-                "cell_count": len(nb_info.cells),
-                "symbol_count": len(nb_info.symbols),
-                "mtime": nb_info.path.stat().st_mtime,
-                "timestamp": time.time(),
-            }
-        _save_checkpoint(args.checkpoint, checkpoint)
-        log.info("Checkpoint saved to %s", args.checkpoint)
 
         # ── Summary ──────────────────────────────────────────────────
         total_cells = sum(len(nb.cells) for nb in parsed)
