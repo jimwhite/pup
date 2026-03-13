@@ -831,12 +831,17 @@ def _upsert_cells(
                                      chunk_size=max_embed_chars)
                 # Provide explicit vector; the other named vector stays empty.
                 other = "code_vector" if vec_name == "comment_vector" else "comment_vector"
-                collection.data.replace(
-                    properties=props,
-                    uuid=uid,
-                    references=refs,
-                    vector={vec_name: vec, other: [0.0] * len(vec)},
-                )
+                vecs = {vec_name: vec, other: [0.0] * len(vec)}
+                if collection.data.exists(uid):
+                    collection.data.replace(
+                        properties=props, uuid=uid,
+                        references=refs, vector=vecs,
+                    )
+                else:
+                    collection.data.insert(
+                        properties=props, uuid=uid,
+                        references=refs, vector=vecs,
+                    )
                 log.info("    Upserted oversized cell %s:%d OK",
                          props["notebook_source"], props["cell_index"])
             except Exception as exc:
