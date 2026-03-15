@@ -5,6 +5,17 @@
 		},
 		{
 			"path": "../../home/acl2"
+		},
+		{
+			"path": "../../home/jovyan"
 		}
-	]
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"/^python3 -c \"\nimport json\nwith open\\('/home/jovyan/\\.vscode-server/data/User/workspaceStorage/60dda27e8c23b889aa79040b4b55af56/GitHub\\.copilot-chat/chat-session-resources/8424a95a-ab22-4add-972b-0d1ced8929d6/toolu_01AThgWun2DM3xVRqbpyA4n7__vscode-1773466045676/content\\.json'\\) as f:\n    data = json\\.load\\(f\\)\nresults = data\\['results'\\]\nprint\\(f'Total: \\{len\\(results\\)\\}'\\)\nfor r in results:\n    print\\(r\\['source_file'\\]\\)\n\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			}
+		}
+	}
 }

@@ -15,7 +15,9 @@
         "RESTARTABLE": "yes",
         "USER": "jovyan",
         "ACL2_LISP": "sbcl",
-        "ACL2": "/home/acl2/saved_acl2",
+        // Only use one ACL2 / SAVED_ACL2 per container.  
+        // Updated the symlinks /opt/acl2/bin/acl2 and /home/acl2/saved_acl2 to point to the same ACL2 executable.
+        "ACL2": "/opt/acl2/bin/acl2",
         "ACL2_HOME": "/home/acl2",
         "ACL2_SYSTEM_BOOKS": "/home/acl2/books"
     },
@@ -46,7 +48,7 @@
                         "env": {
                             "ACL2_HOME": "/home/acl2",
                             "ACL2_SYSTEM_BOOKS": "/home/acl2/books",
-                            "ACL2": "/home/acl2/saved_acl2r",
+                            "ACL2": "/home/acl2/saved_acl2",
                             "SBCL_USER_ARGS": "--noinform",
                             "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
                             "PATH": "${containerWorkspaceFolder}/.venv/bin:/opt/acl2/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
