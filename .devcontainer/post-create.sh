@@ -14,6 +14,7 @@ if [ ! -d "${WORKSPACE_FOLDER}/.venv" ]; then
     python3 -m venv "${WORKSPACE_FOLDER}/.venv"
     "${WORKSPACE_FOLDER}/.venv/bin/pip" install --upgrade pip
     "${WORKSPACE_FOLDER}/.venv/bin/pip" install -e "${WORKSPACE_FOLDER}/acl2-mcp"
+    "${WORKSPACE_FOLDER}/.venv/bin/pip" install 'jupyter-mcp-server>=0.15.0'
     echo "✓ Python venv created and acl2-mcp installed"
 else
     echo "✓ Python venv already exists"

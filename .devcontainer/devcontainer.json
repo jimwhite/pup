@@ -1,15 +1,15 @@
 {
     "name": "PUP",
     "image": "ghcr.io/jimwhite/acl2-jupyter:latest",
-    "forwardPorts": [
-        8888
-    ],
-    "portsAttributes": {
-        "8888": {
-            "label": "Jupyter",
-            "requireLocalPort": true
-        }
-    },
+    "runArgs": ["-p", "8888:8888", "-p", "5555:5000"],
+    // jupyter lab --ip=0.0.0.0 --no-browser  --IdentityProvider.token="MY_TOKEN"
+    // "forwardPorts": [8888],
+    // "portsAttributes": {
+    //     "8888": {
+    //         "label": "Jupyter",
+    //         "requireLocalPort": true
+    //     }
+    // },
     "containerEnv": {
         "JUPYTER_PORT": "8888",
         "RESTARTABLE": "yes",
@@ -46,7 +46,7 @@
                         "env": {
                             "ACL2_HOME": "/home/acl2",
                             "ACL2_SYSTEM_BOOKS": "/home/acl2/books",
-                            "ACL2": "/opt/acl2/bin/saved_acl2",
+                            "ACL2": "/home/acl2/saved_acl2r",
                             "SBCL_USER_ARGS": "--noinform",
                             "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
                             "PATH": "${containerWorkspaceFolder}/.venv/bin:/opt/acl2/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -60,15 +60,11 @@
                         }
                     },
                     "jupyter": {
-                        "command": "uvx",
+                        "command": "npx",
                         "args": [
-                            "jupyter-mcp-server@latest"
-                        ],
-                        "env": {
-                            "JUPYTER_URL": "http://localhost:8888",
-                            "JUPYTER_TOKEN": "MY_TOKEN",
-                            "ALLOW_IMG_OUTPUT": "true"
-                        }
+                            "mcp-remote",
+                            "http://localhost:8888/mcp"
+                        ]
                     }
                 }
             }
