@@ -66,6 +66,11 @@
   (not (member (rewrite-cl.node:node-tag node)
                '(:comment :block-comment :newline :whitespace))))
 
+(defun feature-node-p (node)
+  "True for reader-conditional nodes (#+feat / #-feat)."
+  (member (rewrite-cl.node:node-tag node)
+          '(:feature-positive :feature-negative)))
+
 ;;; ─── Classifying top-level node runs ───────────────────────────────
 ;;;
 ;;; We need to detect "blank lines" — runs of whitespace that contain
@@ -141,6 +146,53 @@ Whitespace and single newlines between forms are discarded."
               ((whitespace-node-p node)
                (advance node)
                (incf i))
+
+              ;; Feature-conditional (#+feat / #-feat) split across lines:
+              ;; merge with the following form so they stay in one cell.
+              ;; Consume any intervening whitespace, comments, and
+              ;; chained feature nodes so working code isn't split.
+              ((feature-node-p node)
+               (let ((start (advance node))
+                     (merged-text (rewrite-cl.node:node-string node))
+                     (last-node node))
+                 (incf i)
+                 (loop while (< i len)
+                       for next = (nth i nodes)
+                       do (cond
+                            ((or (whitespace-node-p next)
+                                 (newline-node-p next)
+                                 (comment-node-p next))
+                             (setf merged-text
+                                   (concatenate 'string merged-text
+                                                (rewrite-cl.node:node-string next)))
+                             (advance next)
+                             (incf i))
+                            ;; Chained feature: #+sbcl #+unix (form)
+                            ((feature-node-p next)
+                             (setf merged-text
+                                   (concatenate 'string merged-text
+                                                (rewrite-cl.node:node-string next)))
+                             (setf last-node next)
+                             (advance next)
+                             (incf i))
+                            ;; The conditioned form — consume and stop.
+                            ((form-node-p next)
+                             (setf merged-text
+                                   (concatenate 'string merged-text
+                                                (rewrite-cl.node:node-string next)))
+                             (setf last-node next)
+                             (advance next)
+                             (incf i)
+                             (return))
+                            ;; Nothing left to consume — stop.
+                            (t (return))))
+                 (push (make-classified-node
+                        :kind :form
+                        :text merged-text
+                        :start-byte start
+                        :end-byte byte-pos
+                        :orig-node last-node)
+                       result)))
 
               ;; Form — everything else.
               (t

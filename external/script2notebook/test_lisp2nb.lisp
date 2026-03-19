@@ -391,12 +391,204 @@
   (test-check "convert-file returns output path"
               (equal output result)))
 
+;;; ─── Tests: feature conditionals (#+feat / #-feat) ─────────────────
+
+(format t "~%=== feature conditionals ===~%")
+
+;; Feature conditional on same line as form — should be one code cell.
+(let* ((src "#+sbcl (require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-same-line" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat same line → 1 code cell" (= 1 (length code-cells)))
+    (when code-cells
+      (test-check "feat same line text has #+sbcl"
+                  (search "#+sbcl" (cell-source-text (first code-cells))))
+      (test-check "feat same line text has require"
+                  (search "require" (cell-source-text (first code-cells)))))))
+
+;; Feature conditional on separate line from form — must merge.
+(let* ((src "#+sbcl
+(require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-next-line" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat next line → 1 code cell" (= 1 (length code-cells)))
+    (when code-cells
+      (let ((text (cell-source-text (first code-cells))))
+        (test-check "feat next line has #+sbcl" (search "#+sbcl" text))
+        (test-check "feat next line has require" (search "require" text))))))
+
+;; Negative feature conditional on separate line.
+(let* ((src "#-ccl
+(require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-negative" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat negative → 1 code cell" (= 1 (length code-cells)))
+    (when code-cells
+      (test-check "feat negative has #-ccl"
+                  (search "#-ccl" (cell-source-text (first code-cells)))))))
+
+;; Chained feature conditionals: #+sbcl #+unix on separate lines.
+(let* ((src "#+sbcl
+#+unix
+(require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-chained" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat chained → 1 code cell" (= 1 (length code-cells)))
+    (when code-cells
+      (let ((text (cell-source-text (first code-cells))))
+        (test-check "feat chained has #+sbcl" (search "#+sbcl" text))
+        (test-check "feat chained has #+unix" (search "#+unix" text))
+        (test-check "feat chained has require" (search "require" text))))))
+
+;; Feature conditional with block comment between — allowed by ANSI CL.
+(let* ((src "#+sbcl #|platform guard|#
+(require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-block-comment" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat + block comment → 1 code cell"
+                (= 1 (length code-cells)))
+    (when code-cells
+      (test-check "feat + block comment has require"
+                  (search "require"
+                          (cell-source-text (first code-cells)))))))
+
+;; Feature conditional with line comment between — must not split.
+(let* ((src "#+sbcl
+; platform-specific require
+(require :sb-posix)
+")
+       (input (write-temp-lisp "test-feat-line-comment" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat + line comment → 1 code cell"
+                (= 1 (length code-cells)))
+    (when code-cells
+      (test-check "feat + line comment has require"
+                  (search "require"
+                          (cell-source-text (first code-cells)))))))
+
+;; Feature conditional with or-expression: #-(or ccl sbcl)
+(let* ((src "#-(or ccl sbcl)
+(error \"unsupported platform\")
+")
+       (input (write-temp-lisp "test-feat-or-expr" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat or-expr → 1 code cell" (= 1 (length code-cells)))
+    (when code-cells
+      (let ((text (cell-source-text (first code-cells))))
+        (test-check "feat or-expr has #-(or" (search "#-(or" text))
+        (test-check "feat or-expr has error" (search "error" text))))))
+
+;; Multiple feature-conditioned forms should each get their own cell.
+(let* ((src "#+sbcl
+(require :sb-posix)
+
+#+ccl
+(require :ccl)
+")
+       (input (write-temp-lisp "test-feat-multi" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "multiple feat forms → 2 code cells"
+                (= 2 (length code-cells)))
+    (when (= 2 (length code-cells))
+      (test-check "first feat cell has sb-posix"
+                  (search "sb-posix"
+                          (cell-source-text (first code-cells))))
+      (test-check "second feat cell has ccl"
+                  (search "ccl"
+                          (cell-source-text (second code-cells)))))))
+
+;; Feature conditional at EOF (no following form) — emit what we have.
+(let* ((src "(defun foo () t)
+#+sbcl
+")
+       (input (write-temp-lisp "test-feat-eof" src))
+       (output (make-pathname :defaults input :type "ipynb")))
+  (convert-file input :output-path output)
+  (let* ((nb (read-notebook-json output))
+         (cells (nb-cells nb))
+         (code-cells (cells-of-type "code" cells)))
+    (test-check "feat at EOF produces notebook" (hash-table-p nb))
+    (test-check "feat at EOF has code cell for defun"
+                (>= (length code-cells) 1))))
+
+;; Real file: centaur/bridge/top.lisp (has #+sbcl on separate lines)
+(let ((source #p"/home/acl2/books/centaur/bridge/top.lisp"))
+  (if (probe-file source)
+      (let ((output (make-pathname :directory '(:absolute "tmp")
+                                   :name "test-bridge-top"
+                                   :type "ipynb")))
+        (handler-case
+            (progn
+              (convert-file source :output-path output
+                                   :markdown-bracket :fenced)
+              (let* ((nb (read-notebook-json output))
+                     (cells (nb-cells nb))
+                     (code-cells (cells-of-type "code" cells)))
+                (test-check "bridge/top.lisp converts"
+                            (plusp (length cells)))
+                ;; Find a cell containing #+sbcl and include-book hunchentoot
+                (let ((merged-cell
+                        (find-if (lambda (c)
+                                   (let ((text (cell-source-text c)))
+                                     (and (search "#+sbcl" text)
+                                          (search "hunchentoot" text))))
+                                 code-cells)))
+                  (test-check "bridge/top.lisp: #+sbcl + hunchentoot in one cell"
+                              merged-cell)))
+              (ignore-errors (delete-file output)))
+          (error (e)
+            (format t "  ERROR: ~A~%" e)
+            (test-check "bridge/top.lisp converts without error" nil))))
+      (format t "  --- bridge/top.lisp not found, skipping ---~%")))
+
 ;;; ─── Cleanup temp files ────────────────────────────────────────────
 
 (dolist (name '("test-basic" "test-multi" "test-comment" "test-detached"
                "test-fenced" "test-empty" "test-wsonly" "test-structure"
                "test-code-meta" "test-provenance" "test-parse-error"
-               "test-pkg-lock" "test-portcullis" "test-retval"))
+               "test-pkg-lock" "test-portcullis" "test-retval"
+               "test-feat-same-line" "test-feat-next-line"
+               "test-feat-negative" "test-feat-chained"
+               "test-feat-block-comment" "test-feat-line-comment"
+               "test-feat-or-expr"
+               "test-feat-multi" "test-feat-eof"))
   (ignore-errors (delete-file (format nil "/tmp/~A.lisp" name)))
   (ignore-errors (delete-file (format nil "/tmp/~A.ipynb" name))))
 
