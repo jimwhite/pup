@@ -1,16 +1,22 @@
 #!/bin/sh
 # Convert a single .lisp/.lsp file to .ipynb using lisp2nb.
-# Usage: lisp2nb-one.sh LISP2NB_PATH [--force] SOURCE_FILE
+# Usage: lisp2nb-one.sh [--force] SOURCE_FILE
 # Exit 0 on success or skip, 1 on failure.
 set -e
 
-LISP2NB="$1"; shift
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LISP2NB="$SCRIPT_DIR/lisp2nb.lisp"
 
 force=false
 if [ "$1" = "--force" ]; then force=true; shift; fi
 
 src="$1"
 nb="${src%.*}.ipynb"
+
+if [ -z "$src" ]; then
+  echo "Usage: $(basename "$0") [--force] SOURCE_FILE" >&2
+  exit 1
+fi
 
 # Staleness check (skip if --force).
 if [ "$force" = false ] && [ -f "$nb" ] && [ ! "$src" -nt "$nb" ]; then
@@ -20,4 +26,4 @@ fi
 exec sbcl --noinform --non-interactive --disable-debugger \
   --load "$LISP2NB" \
   --eval "(lisp2nb:convert-file \"$src\" :markdown-bracket :fenced)" \
-  --eval '(uiop:quit 0)' >/dev/null 2>&1
+  --eval '(uiop:quit 0)'
