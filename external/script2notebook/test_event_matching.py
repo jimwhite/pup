@@ -53,7 +53,7 @@ def test_extract_event_name():
             print(f"    expected {expected!r}, got {got!r}")
             failures += 1
     print(f"extract_event_name: {len(cases) - failures}/{len(cases)} passed")
-    return failures
+    assert failures == 0, f"{failures} cases failed in extract_event_name"
 
 
 def test_extract_cell_name():
@@ -81,7 +81,7 @@ def test_extract_cell_name():
             print(f"    expected {expected!r}, got {got!r}")
             failures += 1
     print(f"extract_cell_name: {len(cases) - failures}/{len(cases)} passed")
-    return failures
+    assert failures == 0, f"{failures} cases failed in extract_cell_name"
 
 
 def test_forms_passthrough():
@@ -117,7 +117,7 @@ def test_forms_passthrough():
     assert frm_a[1] == ["(defun bar (x) x)"], f"cell 1 forms: {frm_a[1]}"
 
     print("forms_passthrough: PASSED")
-    return 0
+    # Important: pytest test functions should not return values.
 
 
 def test_forms_with_macro_expansion():
@@ -152,7 +152,7 @@ def test_forms_with_macro_expansion():
     assert frm_a[1][1] == "(defun sub (x) x)"
 
     print("forms_with_macro_expansion: PASSED")
-    return 0
+    # Important: pytest test functions should not return values.
 
 
 def test_forms_empty_cells():
@@ -174,7 +174,7 @@ def test_forms_empty_cells():
     assert frm_a[2] == []
 
     print("forms_empty_cells: PASSED")
-    return 0
+    # Important: pytest test functions should not return values.
 
 
 def test_matching_all_files(source_root: Path):
@@ -183,7 +183,7 @@ def test_matching_all_files(source_root: Path):
     manifest_path = meta_dir / "manifest.json"
     if not manifest_path.exists():
         print(f"No manifest at {manifest_path}")
-        return 1
+        pytest.skip(f"Missing {manifest_path}")
 
     manifest = json.load(open(manifest_path))
     results = summarize_matching(source_root, manifest)
@@ -201,7 +201,7 @@ def test_matching_all_files(source_root: Path):
     else:
         print("\nAll events assigned!")
 
-    return len(problems)
+    assert len(problems) == 0, f"{len(problems)} files have unassigned events"
 
 
 def _matching_detail(source_root: Path, key: str):
@@ -278,7 +278,7 @@ def test_matching_forms_all_files(source_root: Path):
     manifest_path = meta_dir / "manifest.json"
     if not manifest_path.exists():
         print("No manifest — skipping forms integration test")
-        return 0
+        pytest.skip("Missing boot-metadata/manifest.json")
 
     manifest = json.load(open(manifest_path))
     checked = 0
@@ -327,7 +327,7 @@ def test_matching_forms_all_files(source_root: Path):
               f"{problems} problems")
     else:
         print("forms parallel distribution: skipped (no forms in metadata)")
-    return problems
+    assert problems == 0, f"{problems} form distribution mismatches found"
 
 
 def main():
