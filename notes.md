@@ -9,6 +9,8 @@ https://console.groq.com/docs/model/openai/gpt-oss-20b
 
 TODO: We're gonna want to compare summaries from various models.  So we should have model and prompt properties on the summaries and the ability to select based on those.
 
+TODO: Include acl2:: package on portculis cells.  That way they work as scripts for `acl2 <script-from-ipynb.lisp`.
+(acl2::eval-port-file ...)
 
 defmacro brr@ (sym) in defthm.lisp is interesting case
 http://127.0.0.1:5001/notebook/defthm.lisp?cell=399
@@ -28,6 +30,14 @@ docker ps --filter "publish=8080" --format "{{.ID}} {{.Names}} {{.Image}}"
 # Copy data out of the container
 docker cp weaviate_local:/var/lib/weaviate data/weaviate-backup-$(date +%Y%m%d)
 
+sudo apt-get update
+sudo apt-get install -y file hashalot git-lfs rsync
+
+rsync -a --include="*/" --include="*.ipynb" --exclude="*" home/acl2/ /home/acl2/ 
+
+# Can't change path to books
+rsync -a --include="*/" --include="*.cert" \
+  --include="*.fasl" --include="*.port" --include="*.lisp" --exclude="*" /home/acl2/ acl2/
 
 
 
