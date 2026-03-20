@@ -3,9 +3,22 @@
 
 set -e
 
-WORKSPACE_FOLDER="${1:-/workspaces/verified-agent}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_WORKSPACE_FOLDER="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_FOLDER="${1:-${DEFAULT_WORKSPACE_FOLDER}}"
 
 echo "=== Setting up ACL2 Verified Agent devcontainer ==="
+
+# --- Ensure required submodules are present ---
+echo ""
+echo "Checking required submodules..."
+if [ ! -d "${WORKSPACE_FOLDER}/external/acl2-mcp" ] || [ ! -f "${WORKSPACE_FOLDER}/external/parinfer-rust/Cargo.toml" ]; then
+    echo "Initializing required submodules..."
+    git -C "${WORKSPACE_FOLDER}" submodule update --init --recursive external/acl2-mcp external/parinfer-rust
+    echo "✓ Required submodules initialized"
+else
+    echo "✓ Required submodules already available"
+fi
 
 # --- Python virtual environment ---
 echo ""
@@ -41,7 +54,7 @@ if command -v parinfer-rust >/dev/null 2>&1; then
     echo "✓ parinfer-rust already installed"
 else
     echo "Installing parinfer-rust from GitHub..."
-    cargo install --path external/parinfer-rust
+    cargo install --path "${WORKSPACE_FOLDER}/external/parinfer-rust"
     echo "✓ parinfer-rust installed"
 fi
 
