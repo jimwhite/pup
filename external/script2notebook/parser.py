@@ -13,11 +13,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tree_sitter
-import tree_sitter_commonlisp_noformat as tscl
+try:
+    import tree_sitter_commonlisp_noformat as tscl
+except ModuleNotFoundError:  # pragma: no cover
+    # This optional dependency provides the Common Lisp grammar used by
+    # the tree-sitter based parser. Some environments intentionally
+    # disable tree-sitter usage, so we need graceful imports.
+    tscl = None
 
 
-# Build the tree-sitter Language once at module level.
-_LANGUAGE = tree_sitter.Language(tscl.language())
+# Build the tree-sitter Language once at module level (if available).
+_LANGUAGE = tree_sitter.Language(tscl.language()) if tscl is not None else None
 
 
 class NodeKind(enum.Enum):
@@ -50,6 +56,12 @@ def parse(source: str | bytes) -> tuple[list[Node], tree_sitter.Tree]:
     hints.  The raw *tree* is provided so downstream code can walk
     into forms to locate inline comments.
     """
+    if _LANGUAGE is None:
+        raise ModuleNotFoundError(
+            "tree_sitter_commonlisp_noformat is required for parse(); "
+            "the tree-sitter dependency appears to be disabled/missing."
+        )
+
     if isinstance(source, str):
         source_bytes = source.encode("utf-8")
         source_str = source

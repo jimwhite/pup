@@ -31,6 +31,14 @@ import nbformat
 
 log = logging.getLogger(__name__)
 
+try:
+    import jupyter_client  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "jupyter_client not installed (skipping bootstrap kernel tests)",
+        allow_module_level=True,
+    )
+
 ACL2_HOME = Path("/home/acl2")
 EVENTS_MIME = "application/vnd.acl2.events+json"
 
