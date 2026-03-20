@@ -3,22 +3,9 @@
 
 set -e
 
-WORKSPACE_FOLDER="${1:-/workspaces/verified-agent}"
+WORKSPACE_FOLDER="${1:-.}"
 
 echo "=== Setting up ACL2 Verified Agent devcontainer ==="
-
-# --- Python virtual environment ---
-echo ""
-echo "Setting up Python virtual environment..."
-if [ ! -d "${WORKSPACE_FOLDER}/.venv" ]; then
-    python3 -m venv "${WORKSPACE_FOLDER}/.venv"
-    "${WORKSPACE_FOLDER}/.venv/bin/pip" install --upgrade pip
-    "${WORKSPACE_FOLDER}/.venv/bin/pip" install -e "${WORKSPACE_FOLDER}/acl2-mcp"
-    "${WORKSPACE_FOLDER}/.venv/bin/pip" install 'jupyter-mcp-server>=0.15.0'
-    echo "✓ Python venv created and acl2-mcp installed"
-else
-    echo "✓ Python venv already exists"
-fi
 
 # --- Rust toolchain ---
 echo ""
@@ -51,6 +38,36 @@ if ! grep -q 'source.*\.cargo/env' ~/.bashrc 2>/dev/null; then
     echo '# Rust/Cargo environment' >> ~/.bashrc
     echo '[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"' >> ~/.bashrc
     echo "✓ Added cargo to ~/.bashrc"
+fi
+
+# --- Python virtual environment ---
+echo ""
+echo "Setting up Python virtual environment..."
+if [ ! -d "${WORKSPACE_FOLDER}/.venv" ]; then
+    python3 -m venv "${WORKSPACE_FOLDER}/.venv"
+    "${WORKSPACE_FOLDER}/.venv/bin/pip" install --upgrade pip
+    "${WORKSPACE_FOLDER}/.venv/bin/pip" install -e "${WORKSPACE_FOLDER}/external/acl2-mcp"
+    "${WORKSPACE_FOLDER}/.venv/bin/pip" install -e "${WORKSPACE_FOLDER}/external/acl2-kg-mcp"
+    "${WORKSPACE_FOLDER}/.venv/bin/pip" install 'jupyter-mcp-server>=0.15.0' z3-solver
+    echo "✓ Python venv created and acl2-mcp installed"
+else
+    echo "✓ Python venv already exists"
+fi
+
+# --- ACL2 Jupyter Kernel ---
+echo ""
+echo "Re-installing ACL2 Jupyter kernelspec (aligning Quicklisp packages with ACL2)..."
+# The Dockerfile installs these as root; fix ownership so the installer can update them
+LOCAL_PROJECTS_KERNEL="${HOME}/quicklisp/local-projects/acl2-jupyter-kernel"
+if [ -d "${LOCAL_PROJECTS_KERNEL}" ]; then
+    sudo chown -R "$(id -u):$(id -g)" "${LOCAL_PROJECTS_KERNEL}"
+fi
+KERNEL_INSTALL="${WORKSPACE_FOLDER}/external/acl2-jupyter-kernel/install-kernelspec.sh"
+if [ -x "${KERNEL_INSTALL}" ]; then
+    "${KERNEL_INSTALL}"
+    echo "✓ ACL2 Jupyter kernelspec re-installed"
+else
+    echo "⚠ install-kernelspec.sh not found or not executable at ${KERNEL_INSTALL}"
 fi
 
 echo ""
