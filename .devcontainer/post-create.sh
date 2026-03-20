@@ -14,7 +14,7 @@ echo ""
 echo "Checking required submodules..."
 if [ ! -d "${WORKSPACE_FOLDER}/external/acl2-mcp" ] || [ ! -f "${WORKSPACE_FOLDER}/external/parinfer-rust/Cargo.toml" ]; then
     echo "Initializing required submodules..."
-    git -C "${WORKSPACE_FOLDER}" submodule update --init --recursive external/acl2-mcp external/parinfer-rust
+    git -C "${WORKSPACE_FOLDER}" submodule update --init --recursive
     echo "✓ Required submodules initialized"
 else
     echo "✓ Required submodules already available"
