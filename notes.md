@@ -2,15 +2,22 @@ TODO:  FOR NEXT NOTEBOOK INGESTION: The comment cells are including the fences. 
 
 TODO: Give symbols that are defined in each cell.  Have symbol as tool param.  Matching for ingest.
 
-TODO: Drop portcullis cells from summarization - they're not in the source it is for processing only.
+DONE: Drop portcullis cells from summarization - they're not in the source it is for processing only.
 
 TODO: Try groq gpt-oss-20b for speed.  We'll use an API key.
 https://console.groq.com/docs/model/openai/gpt-oss-20b
 
 TODO: We're gonna want to compare summaries from various models.  So we should have model and prompt properties on the summaries and the ability to select based on those.
 
-TODO: Include acl2:: package on portculis cells.  That way they work as scripts for `acl2 <script-from-ipynb.lisp`.
+DONE: Include acl2:: package on portculis cells.  That way they work as scripts for `acl2 <script-from-ipynb.lisp`.
 (acl2::eval-port-file ...)
+
+TODO: Fix the output channel flushing (again).  It happens on every chunk causing line breaks.
+AH.  Actually this is a problem in the notebook display.  The stdout output text is correct without extra breaks.
+
+
+TODO: /home/acl2/books/centaur/bridge/top.ipynb has error in execution complaining sleep$ is in CL.
+
 
 defmacro brr@ (sym) in defthm.lisp is interesting case
 http://127.0.0.1:5001/notebook/defthm.lisp?cell=399
@@ -42,6 +49,10 @@ rsync -a --include="*/" --include="*.ipynb" --exclude="*" home/acl2/ /home/acl2/
 # Can't change path to books
 rsync -a --include="*/" --include="*.cert" \
   --include="*.fasl" --include="*.port" --include="*.lisp" --exclude="*" /home/acl2/ acl2/
+
+
+make sanitize-lisp
+make -j `nproc` notebooks-convert
 
 
 

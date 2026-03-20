@@ -58,7 +58,40 @@ fi
 
 # --- ACL2 Jupyter Kernel ---
 echo ""
-echo "Re-installing ACL2 Jupyter kernelspec (aligning Quicklisp packages with ACL2)..."
+echo "Aligning Quicklisp packages with ACL2 build..."
+
+# Remove any packages from jovyan's Quicklisp dist that also exist in ACL2's
+# bundled Quicklisp.  The kernel loads into the ACL2 image which already has
+# its bundle versions; having a second (newer) copy in jovyan's dist causes
+# defconstant-uneql errors when ACL2 books try to reload them.
+ACL2_BUNDLE_SW="${ACL2_HOME:-/home/acl2}/books/quicklisp/bundle/software"
+JOVYAN_DIST_SW="${HOME}/quicklisp/dists/quicklisp/software"
+if [ -d "${ACL2_BUNDLE_SW}" ] && [ -d "${JOVYAN_DIST_SW}" ]; then
+    for acl2_pkg in "${ACL2_BUNDLE_SW}"/*/; do
+        base=$(basename "$acl2_pkg" | sed 's/-[0-9v].*//')
+        for jovyan_pkg in "${JOVYAN_DIST_SW}/${base}"-*/; do
+            if [ -d "$jovyan_pkg" ]; then
+                echo "  removing duplicate: $(basename "$jovyan_pkg")"
+                rm -rf "$jovyan_pkg"
+            fi
+        done
+    done
+    echo "✓ Duplicate Quicklisp packages removed"
+fi
+
+# Tell ASDF where to find ACL2's bundle packages (now the only copies).
+ASDF_CONF_DIR="${HOME}/.config/common-lisp/source-registry.conf.d"
+if [ -d "${ACL2_BUNDLE_SW}" ] && [ ! -f "${ASDF_CONF_DIR}/01-acl2-bundle.conf" ]; then
+    mkdir -p "${ASDF_CONF_DIR}"
+    echo "(:tree \"${ACL2_BUNDLE_SW}/\")" > "${ASDF_CONF_DIR}/01-acl2-bundle.conf"
+    echo "✓ ASDF source registry configured for ACL2 bundle"
+fi
+
+# Clear stale ASDF fasl cache so recompilation picks up the right sources.
+rm -rf "${HOME}/.cache/common-lisp/"
+echo "✓ ASDF fasl cache cleared"
+
+# Re-install the kernelspec with the latest installer code
 # The Dockerfile installs these as root; fix ownership so the installer can update them
 LOCAL_PROJECTS_KERNEL="${HOME}/quicklisp/local-projects/acl2-jupyter-kernel"
 if [ -d "${LOCAL_PROJECTS_KERNEL}" ]; then
