@@ -77,7 +77,7 @@ class TestInjectPortFileCell:
         assert result is False
 
     def test_inject_when_port_exists(self, tmp_path):
-        """When .port file exists, inject eval-port-file cell."""
+        """When .port file exists, inject acl2::eval-port-file cell."""
         nb_path, src_path, _ = _make_notebook(tmp_path)
         src_path.write_text('(in-package "DM")\n')
         # Create a .port file (content doesn't matter for the test).
@@ -92,9 +92,9 @@ class TestInjectPortFileCell:
         injected = nb["cells"][0]
         assert injected["cell_type"] == "code"
         assert injected["metadata"]["provenance"]["portcullis"] is True
-        # The cell should call eval-port-file with the absolute source path.
+        # The cell should call acl2::eval-port-file with the absolute source path.
         source_text = "".join(injected["source"])
-        assert "eval-port-file" in source_text
+        assert "acl2::eval-port-file" in source_text
         assert str(src_path.resolve()) in source_text
         # Original cell still last.
         assert nb["cells"][1]["id"] == "cell1"
@@ -125,7 +125,7 @@ class TestInjectPortFileCell:
         assert result is False
 
     def test_cell_uses_absolute_path(self, tmp_path):
-        """The eval-port-file call must use an absolute path."""
+        """The acl2::eval-port-file call must use an absolute path."""
         nb_path, src_path, _ = _make_notebook(tmp_path)
         src_path.write_text('(in-package "ACL2")\n')
         src_path.with_suffix(".port").write_bytes(b"(port)")
