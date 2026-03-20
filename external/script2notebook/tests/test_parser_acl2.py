@@ -13,6 +13,14 @@ top-level form extraction.
 """
 
 import pytest
+import importlib.util
+
+if importlib.util.find_spec("tree_sitter_commonlisp_noformat") is None:
+    pytest.skip(
+        "tree_sitter_commonlisp_noformat not installed (tree-sitter disabled)",
+        allow_module_level=True,
+    )
+
 import tree_sitter
 import tree_sitter_commonlisp_noformat as tscl
 from pathlib import Path

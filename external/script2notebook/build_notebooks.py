@@ -136,9 +136,9 @@ def _inject_acl2_metadata(notebook: Path, source: Path) -> None:
 
 
 def _inject_port_file_cell(notebook: Path, source: Path) -> bool:
-    """Prepend an ``eval-port-file`` cell to *notebook* if a ``.port`` file exists.
+    """Prepend an ``acl2::eval-port-file`` cell to *notebook* if a ``.port`` file exists.
 
-    ACL2's ``eval-port-file`` loads the *complete* accumulated portcullis
+    ACL2's ``acl2::eval-port-file`` loads the *complete* accumulated portcullis
     for a book from its ``.port`` file — including all transitive
     dependency portcullis commands (package definitions, etc.).  This
     single call replaces all bespoke ``.acl2`` parsing, ``certify-book``
@@ -177,7 +177,7 @@ def _inject_port_file_cell(notebook: Path, source: Path) -> bool:
         "cell_type": "code",
         "metadata": {"provenance": {"portcullis": True}},
         "source": [
-            f'(eval-port-file "{source_abs}" \'portcullis state)',
+            f'(acl2::eval-port-file "{source_abs}" \'portcullis state)',
         ],
         "execution_count": None,
         "outputs": [],
@@ -191,7 +191,7 @@ def _inject_port_file_cell(notebook: Path, source: Path) -> bool:
         json.dump(nb, f, indent=1)
         f.write("\n")
 
-    log.debug("Injected eval-port-file cell into %s (from %s)", notebook, port_path)
+    log.debug("Injected acl2::eval-port-file cell into %s (from %s)", notebook, port_path)
     return True
 
 
@@ -634,13 +634,13 @@ def phase_execute(
     if not pairs:
         return 0, total_certified, 0
 
-    # ── Inject eval-port-file cell before execution ──
+    # ── Inject acl2::eval-port-file cell before execution ──
     injected_count = 0
     for source, notebook in pairs:
         if _inject_port_file_cell(notebook, source):
             injected_count += 1
     if injected_count:
-        log.debug("Injected eval-port-file cell into %d notebook(s)", injected_count)
+        log.debug("Injected acl2::eval-port-file cell into %d notebook(s)", injected_count)
 
     if log_dir is not None:
         log.info("Kernel logs → %s", log_dir)

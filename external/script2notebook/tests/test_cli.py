@@ -3,7 +3,14 @@
 import json
 import os
 import time
+import importlib.util
 import pytest
+
+if importlib.util.find_spec("tree_sitter_commonlisp_noformat") is None:
+    pytest.skip(
+        "tree_sitter_commonlisp_noformat not installed (tree-sitter disabled)",
+        allow_module_level=True,
+    )
 
 from script2notebook.cli import main
 

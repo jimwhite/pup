@@ -25,6 +25,10 @@ And at that point besides using the LLM we would rather have an exact answer so 
 
 
 
+
+sudo apt-get update
+sudo apt-get install -y file hashalot git-lfs rsync
+
 docker ps --filter "publish=8080" --format "{{.ID}} {{.Names}} {{.Image}}"
 
 # Copy data out of the container

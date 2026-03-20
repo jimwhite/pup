@@ -3,6 +3,8 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_WORKSPACE_FOLDER="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_FOLDER="${1:-.}"
 
 echo "=== Setting up ACL2 Verified Agent devcontainer ==="
@@ -28,7 +30,7 @@ if command -v parinfer-rust >/dev/null 2>&1; then
     echo "✓ parinfer-rust already installed"
 else
     echo "Installing parinfer-rust from GitHub..."
-    cargo install --path external/parinfer-rust
+    cargo install --path "${WORKSPACE_FOLDER}/external/parinfer-rust"
     echo "✓ parinfer-rust installed"
 fi
 
