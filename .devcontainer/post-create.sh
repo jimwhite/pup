@@ -9,6 +9,24 @@ WORKSPACE_FOLDER="${1:-.}"
 
 echo "=== Setting up ACL2 Verified Agent devcontainer ==="
 
+# --- Node.js upgrade ---
+echo ""
+echo "Ensuring Node.js >= 20.18.1 for compatibility..."
+CURRENT_NODE=$(node --version 2>/dev/null || echo "v0.0.0")
+NODE_MAJOR=$(echo $CURRENT_NODE | sed 's/v\([0-9]*\).*/\1/')
+if [ "$NODE_MAJOR" -lt 20 ]; then
+    echo "Upgrading Node.js from $CURRENT_NODE to Node 20 LTS..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    echo "✓ Node.js upgraded to $(node --version)"
+else
+    echo "✓ Node.js $CURRENT_NODE is compatible"
+fi
+
+# Report npm version from the installed Node.js runtime.
+# Avoid global npm mutation here to prevent permission/cache drift in devcontainers.
+echo "✓ npm available: $(npm --version)"
+
 # --- Rust toolchain ---
 echo ""
 echo "Setting up Rust toolchain..."
@@ -104,6 +122,14 @@ if [ -x "${KERNEL_INSTALL}" ]; then
 else
     echo "⚠ install-kernelspec.sh not found or not executable at ${KERNEL_INSTALL}"
 fi
+
+# --- Jupyter Lab configuration ---
+echo ""
+echo "Setting up Jupyter Lab configuration..."
+JUPYTER_CONFIG_DIR="${HOME}/.jupyter"
+mkdir -p "${JUPYTER_CONFIG_DIR}"
+cp "${WORKSPACE_FOLDER}/.devcontainer/jupyter_lab_config.py" "${JUPYTER_CONFIG_DIR}/jupyter_lab_config.py"
+echo "✓ Jupyter Lab config installed (now 'jupyter lab' will use defaults)"
 
 echo ""
 echo "=== Setup complete! ==="

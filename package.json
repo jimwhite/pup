@@ -1,4 +1,7 @@
 {
+  "engines": {
+    "node": ">=20.18.1"
+  },
   "dependencies": {
     "gyp": "^0.3.0",
     "tree-sitter-cli": "^0.26.5",

@@ -18,6 +18,29 @@ AH.  Actually this is a problem in the notebook display.  The stdout output text
 
 TODO: /home/acl2/books/centaur/bridge/top.ipynb has error in execution complaining sleep$ is in CL.
 
+TODO: Track how long notebooks and cells take to execute.  Also how much RAM does the notebook need to complete.
+There are some that take >14GB like /home/acl2/books/projects/vescmul/demo/demo-1.ipynb
+***********************************************
+************ ABORTING from raw Lisp ***********
+********** (see :DOC raw-lisp-error) **********
+Error:  Heap exhausted (no more space for allocation).
+13797752832 bytes available, 14165556304 requested.
+And that got killed even with Docker Desktop RAM at 80GB.
+
+
+TODO: Handle deps like `;; (depends-on ...`
+
+WARNING: Execute /home/acl2/books/kestrel/axe/x86/tests/ndsu/run-tests-xor.ipynb: attempt 1/2 failed, retrying… FAILED (94.1s): Here is a preview of the cell contents:
+-------------------
+;; (depends-on "xor.macho64")
+(test-file "xor.macho64")
+-------------------
+
+
+Agents writing ACL2.
+
+TODO:  Eric S: There are .cert variables.  "This book requires X."
+
 
 defmacro brr@ (sym) in defthm.lisp is interesting case
 http://127.0.0.1:5001/notebook/defthm.lisp?cell=399
@@ -114,3 +137,7 @@ docker start weaviate_local
 ```
 
 `docker stop` sends SIGTERM, which Weaviate handles gracefully — it flushes all pending writes before shutting down. The copy you already took is *probably* fine since Weaviate was likely idle (no active writes), but if you want a guaranteed-clean backup, re-do it with the stop/start sandwich.
+
+
+jupyter lab --IdentityProvider.token='MY_TOKEN'
+
