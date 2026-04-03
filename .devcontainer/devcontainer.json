@@ -1,6 +1,6 @@
 {
     "name": "PUP",
-    "image": "ghcr.io/jimwhite/acl2-jupyter:latest",
+    "image": "ghcr.io/jimwhite/acl2-jupyter:acl2-8.7-z3-stp",
     "runArgs": ["-p", "8888:8888", "-p", "5555:5000"],
     // Requires Node.js >= 20.18.1. The post-create script will upgrade the Node.js version if needed.
     // jupyter lab --ip=0.0.0.0 --no-browser  --IdentityProvider.token="MY_TOKEN"
