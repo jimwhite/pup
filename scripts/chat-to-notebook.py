@@ -41,13 +41,38 @@ def _ts_str(ts: float | None) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _resolve_citations(text: str, msg: dict[str, Any]) -> str:
+    """Replace PUA citation markers with their markdown link equivalents.
+
+    ChatGPT embeds citations as \\ue200cite\\ue202...\\ue201 spans.
+    The content_references metadata maps each span (by start/end index)
+    to an ``alt`` field containing a markdown link.
+    """
+    refs = (msg.get("metadata") or {}).get("content_references", [])
+    if not refs:
+        return text
+    # Sort by start_idx descending so replacements don't shift later offsets.
+    refs_sorted = sorted(
+        (r for r in refs if r.get("start_idx") is not None and r.get("alt")),
+        key=lambda r: r["start_idx"],
+        reverse=True,
+    )
+    for ref in refs_sorted:
+        start = ref["start_idx"]
+        end = ref["end_idx"]
+        alt = ref["alt"]
+        text = text[:start] + alt + text[end:]
+    return text
+
+
 def _text_parts(msg: dict[str, Any]) -> str:
     """Extract the displayable text from a message."""
     content = msg.get("content", {})
     ct = content.get("content_type", "")
     if ct == "text":
         parts = content.get("parts", [])
-        return "\n".join(str(p) for p in parts if p)
+        text = "\n".join(str(p) for p in parts if p)
+        return _resolve_citations(text, msg)
     if ct == "thoughts":
         thoughts = content.get("thoughts", [])
         pieces = []
