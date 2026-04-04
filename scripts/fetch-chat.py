@@ -66,7 +66,9 @@ def _extract_stream_chunks(html: str) -> list[str]:
     chunks: list[str] = []
     for m in pattern.finditer(html):
         raw = m.group(1)
-        unescaped = raw.encode().decode("unicode_escape")
+        # The captured text is the interior of a JS double-quoted string.
+        # JSON uses the same escape rules, so let json.loads decode it.
+        unescaped = json.loads('"' + raw + '"')
         chunks.append(unescaped)
     return chunks
 
