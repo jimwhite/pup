@@ -260,9 +260,13 @@ def _convert_to_notebook(data: dict[str, Any]) -> dict[str, Any]:
             ts = msg.get("create_time")
             if ts:
                 user_meta["chatgpt"]["create_time"] = ts
-            source = f"**User:**\n\n{text}"
-            source += _metadata_block(msg)
-            cells.append(_make_markdown_cell(source, **user_meta))
+            cells.append({
+                "cell_type": "code",
+                "metadata": user_meta,
+                "source": text.splitlines(keepends=True),
+                "execution_count": None,
+                "outputs": [],
+            })
             i += 1
 
             intermediate: list[dict[str, Any]] = []
